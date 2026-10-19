@@ -8,6 +8,7 @@ import { analyseConnectome } from "./analysis.js";
 import { BrainView } from "./brainview.js";
 import { Panels, MODE_COLORS, swarmColor } from "./panels.js";
 import { IdeasMap } from "./ideas.js";
+import { GAMES } from "./game.js";
 
 const $ = (s) => document.querySelector(s);
 const sigmoid = (x) => 1 / (1 + Math.exp(-x));
@@ -34,6 +35,8 @@ await new Promise((r) => setTimeout(r, 30));
 
 const settings = { color: "strategy", social: true, path: true, pathsAll: false, speed: 1, paused: false };
 let sim = new Sim(cx, { flies: 220 });
+const WORKER_URL = new URL("./brain-worker.js", import.meta.url);
+sim.brains.enableWorker(WORKER_URL);
 let selected = -1;
 let follow = false;
 
@@ -253,7 +256,7 @@ function flyColor(i, out) {
       return out.setHSL(0.0 + 0.33 * e, 0.75, 0.35 + 0.25 * e);
     }
     default: {
-      out.copy(C_DOVE).lerp(C_HAWK, sigmoid(sim.hawkGene[i]));
+      out.copy(C_DOVE).lerp(C_HAWK, sim.disposition(i));
       if (sim.cooldown[i] > 1.1) out.lerp(sim.lastHawk[i] ? C_HAWK : C_DOVE, 0.6).multiplyScalar(1.4); // flash on contest
       return out;
     }
@@ -429,6 +432,12 @@ const brain = new BrainView($("#brain-view"), cx, data.neurons, analysis);
 const panels = new Panels({ sim: () => sim, cx, analysis, refs, brain, onFollow: (v) => (follow = v), onDeselect: () => select(-1) });
 const ideas = new IdeasMap($("#ideas-svg"), $("#ideas-detail"), { sim: () => sim, cx, analysis, refs });
 
+// ------------------------------------------------------------------ shareable state (?V=2&C=5&game=pd…)
+const SLIDERS = { V: "#r-V", C: "#r-C", mut: "#r-mut", n: "#r-n", gain: "#r-gain", eps: "#r-eps", min: "#r-min" };
+const query = new URLSearchParams(location.search);
+for (const [k, id] of Object.entries(SLIDERS)) if (query.has(k)) $(id).value = query.get(k);
+if (query.has("pred")) $("#c-pred").checked = query.get("pred") !== "0";
+
 // ------------------------------------------------------------------ controls wiring
 function bindRange(id, out, fmt, apply) {
   const el = $(id), o = $(out);
@@ -447,6 +456,7 @@ bindRange("#r-gain", "#o-gain", (v) => v.toFixed(1), (v) => (sim.params.gain = v
 bindRange("#r-eps", "#o-eps", (v) => v.toFixed(1), (v) => (sim.params.dbEps = v));
 bindRange("#r-min", "#o-min", (v) => v.toFixed(0), (v) => (sim.params.dbMin = v));
 $("#c-pred").addEventListener("change", (e) => (sim.params.predator = e.target.checked));
+sim.params.predator = $("#c-pred").checked;
 $("#c-social").addEventListener("change", (e) => (settings.social = e.target.checked));
 $("#c-path").addEventListener("change", (e) => (settings.path = e.target.checked));
 $("#c-paths-all").addEventListener("change", (e) => (settings.pathsAll = e.target.checked));
@@ -469,13 +479,44 @@ for (const [btn, cls] of [["#btn-left", "hide-left"], ["#btn-right", "hide-right
     resize();
   });
 }
-document.querySelectorAll("#seg-color button").forEach((b) =>
-  b.addEventListener("click", () => {
-    document.querySelectorAll("#seg-color button").forEach((x) => x.classList.toggle("on", x === b));
-    settings.color = b.dataset.v;
-    panels.legend(settings.color);
-  })
-);
+
+function segment(id, onPick) {
+  const buttons = document.querySelectorAll(`${id} button`);
+  const pick = (v) => {
+    buttons.forEach((x) => x.classList.toggle("on", x.dataset.v === v));
+    onPick(v);
+  };
+  buttons.forEach((b) => b.addEventListener("click", () => pick(b.dataset.v)));
+  return pick;
+}
+
+// game choice: relabel the two payoff sliders and (unless restoring a link) load sensible defaults
+function setGame(game, keepValues) {
+  const g = GAMES[game];
+  $("#lbl-V").textContent = g.vLabel;
+  $("#lbl-C").textContent = g.cLabel;
+  if (!keepValues) {
+    $("#r-V").value = g.defaults[0];
+    $("#r-C").value = g.defaults[1];
+  }
+  $("#o-V").textContent = (+$("#r-V").value).toFixed(1);
+  $("#o-C").textContent = (+$("#r-C").value).toFixed(1);
+  sim.setGame(game, +$("#r-V").value, +$("#r-C").value);
+  panels.legend(settings.color);
+  panels.update(selected);
+}
+segment("#seg-game", (v) => setGame(v, false));
+const pickLearn = segment("#seg-learn", (v) => (sim.params.learnFrom = v));
+const pickColor = segment("#seg-color", (v) => {
+  settings.color = v;
+  panels.legend(v);
+});
+if (GAMES[query.get("game")]) {
+  document.querySelectorAll("#seg-game button").forEach((x) => x.classList.toggle("on", x.dataset.v === query.get("game")));
+  setGame(query.get("game"), true);
+}
+if (query.get("learn") === "anyone") pickLearn("anyone");
+if (["strategy", "swarm", "mode", "energy"].includes(query.get("color"))) pickColor(query.get("color"));
 panels.legend(settings.color);
 
 // silencing experiments
@@ -501,10 +542,45 @@ for (const s of SILENCE) {
 function applySilence() {
   sim.silenced = new Set(SILENCE.flatMap((s) => (s.input.checked ? s.nodes.filter((i) => i >= 0) : [])));
 }
+for (const k of (query.get("silence") || "").split(",")) if (k !== "" && SILENCE[+k]) SILENCE[+k].input.checked = true;
+applySilence();
+
+function stateQuery() {
+  const q = new URLSearchParams();
+  q.set("game", sim.params.game);
+  for (const [k, id] of Object.entries(SLIDERS)) q.set(k, $(id).value);
+  if (!sim.params.predator) q.set("pred", "0");
+  if (sim.params.learnFrom !== "neighbours") q.set("learn", sim.params.learnFrom);
+  if (settings.color !== "strategy") q.set("color", settings.color);
+  const off = SILENCE.flatMap((s, k) => (s.input.checked ? [k] : []));
+  if (off.length) q.set("silence", off.join(","));
+  return "?" + q.toString();
+}
+let lastQuery = "";
+function syncUrl() {
+  const q = stateQuery();
+  if (q !== lastQuery) {
+    lastQuery = q;
+    history.replaceState(null, "", q);
+  }
+}
+$("#btn-share").addEventListener("click", async () => {
+  syncUrl();
+  const btn = $("#btn-share");
+  try {
+    await navigator.clipboard.writeText(location.href);
+    btn.textContent = "Link copied ✓";
+  } catch {
+    btn.textContent = "Copy the address bar";
+  }
+  setTimeout(() => (btn.textContent = "Copy link to this setup"), 1800);
+});
 
 $("#btn-reset").addEventListener("click", () => {
   const params = { ...sim.params };
+  sim.brains.dispose();
   sim = new Sim(cx, { flies: +$("#r-n").value, params, seed: (Math.random() * 1e9) | 0 });
+  sim.brains.enableWorker(WORKER_URL);
   applySilence();
   buildWorld();
   select(-1);
@@ -552,6 +628,7 @@ function frame(now) {
     uiTimer = 0;
     panels.update(selected);
     ideas.update();
+    syncUrl();
   }
   requestAnimationFrame(frame);
 }

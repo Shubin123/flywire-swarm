@@ -1137,6 +1137,27 @@
 "venue": "Journal of Theoretical Biology, 31, 295-311",
 "doi": "10.1016/0022-5193(71)90189-5"
 },
+"traulsen2006": {
+"authors": [
+"Arne Traulsen",
+"Martin A. Nowak",
+"Jorge M. Pacheco"
+],
+"year": 2006,
+"title": "Stochastic dynamics of invasion and fixation",
+"venue": "Physical Review E, 74",
+"doi": "10.1103/PhysRevE.74.011909"
+},
+"hauert2004": {
+"authors": [
+"Christoph Hauert",
+"Michael Doebeli"
+],
+"year": 2004,
+"title": "Spatial structure often inhibits the evolution of cooperation in the snowdrift game",
+"venue": "Nature, 428, 643-646",
+"doi": "10.1038/nature02360"
+},
 "hart1968": {
 "authors": [
 "Peter Hart",

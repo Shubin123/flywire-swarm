@@ -1,6 +1,6 @@
 // Side panels: tabs, live statistics, charts, the selected-fly card and citations.
 import { MODE_NAMES } from "./sim.js";
-import { essHawk } from "./game.js";
+import { GAMES, equilibria } from "./game.js";
 import { CLASS_COLORS } from "./brainview.js";
 
 export const MODE_COLORS = ["#7ddc8a", "#f2a541", "#ff4d6d", "#b388ff"];
@@ -59,9 +59,10 @@ export class Panels {
 
   // ------------------------------------------------------------------ legend & fly card
   legend(mode) {
+    const g = GAMES[this.sim().params.game];
     let html = "";
     if (mode === "strategy")
-      html = `<span><i class="sw" style="background:var(--dove)"></i>dove-leaning</span><span><i class="sw" style="background:var(--hawk)"></i>hawk-leaning</span><span>flash = contest just played</span>`;
+      html = `<span><i class="sw" style="background:var(--dove)"></i>${g.B}-leaning</span><span><i class="sw" style="background:var(--hawk)"></i>${g.A}-leaning</span><span>flash = contest just played</span>`;
     else if (mode === "swarm") html = `<span>colour = DBSCAN swarm</span><span><i class="sw" style="background:#6b7785"></i>noise</span>`;
     else if (mode === "mode") html = MODE_NAMES.map((m, i) => `<span><i class="sw" style="background:${MODE_COLORS[i]}"></i>${m}</span>`).join("");
     else html = `<span><i class="sw" style="background:hsl(0 75% 35%)"></i>starving</span><span><i class="sw" style="background:hsl(120 75% 60%)"></i>well fed</span>`;
@@ -81,13 +82,15 @@ export class Panels {
   flyCard(i) {
     const s = this.sim();
     const tgt = s.target[i] >= 0 ? `patch ${s.target[i]}` : "none";
-    const strat = sigmoid(s.hawkGene[i]);
-    const last = s.lastHawk[i] < 0 ? "–" : s.lastHawk[i] ? "Hawk" : "Dove";
+    const strat = s.disposition(i);
+    const g = GAMES[s.params.game];
+    const last = s.lastHawk[i] < 0 ? "–" : s.lastHawk[i] ? g.A : g.B;
     $("#flycard").innerHTML = `<span class="close" title="Deselect">✕</span>
       <b>Fly #${s.id[i]}</b> <span class="note">gen ${s.generation[i]}${s.parent[i] >= 0 ? ` · parent #${s.parent[i]}` : ""}</span>
       <div class="kv">${kv([
         ["energy", fmt(s.energy[i], 1)],
-        ["hawk disposition", fmt(strat)],
+        [`${g.A} disposition`, fmt(strat)],
+        ["recent game payoff", s.played[i] ? fmt(s.payoff[i]) : "–"],
         ["octopamine (OA) activity", fmt(s.oa[i])],
         ["last contest", last],
         ["target", tgt],
@@ -227,22 +230,28 @@ export class Panels {
   }
 
   updateGame() {
-    const s = this.sim(), P = s.params;
+    const s = this.sim(), P = s.params, g = GAMES[P.game];
+    const m = g.matrix(P.V, P.C);
     const cell = (a, b) => `${fmt(a, 1)}, ${fmt(b, 1)}`;
     $("#payoff").innerHTML = `<table class="payoff">
-      <tr><th></th><th>opponent Hawk</th><th>opponent Dove</th></tr>
-      <tr><th>Hawk</th><td>${cell((P.V - P.C) / 2, (P.V - P.C) / 2)}</td><td>${cell(P.V, 0)}</td></tr>
-      <tr><th>Dove</th><td>${cell(0, P.V)}</td><td>${cell(P.V / 2, P.V / 2)}</td></tr></table>`;
+      <tr><th>${g.name}</th><th>vs ${g.A}</th><th>vs ${g.B}</th></tr>
+      <tr><th>${g.A}</th><td>${cell(m[0][0], m[0][0])}</td><td>${cell(m[0][1], m[1][0])}</td></tr>
+      <tr><th>${g.B}</th><td>${cell(m[1][0], m[0][1])}</td><td>${cell(m[1][1], m[1][1])}</td></tr></table>`;
+    $("#game-about").textContent = g.about;
+    const eq = equilibria(m);
+    const show = (xs) => (xs.length ? xs.map((x) => fmt(x)).join(", ") : "none");
     const st = s.stats;
     const total = st.hh + st.hd + st.dd || 1;
+    const [a, b] = [g.A[0], g.B[0]];
     $("#game-stats").innerHTML = kv([
-      ["ESS hawk share (V/C)", fmt(essHawk(P.V, P.C))],
-      ["hawk share played (recent)", fmt(s.history.at(-1)?.played ?? 0)],
-      ["mean hawk disposition", fmt(s.meanHawk())],
+      [`stable ${g.A} shares (ESS)`, show(eq.stable)],
+      ["unstable rest points", show(eq.unstable)],
+      [`${g.A} share played (recent)`, fmt(s.stats.played())],
+      [`mean ${g.A} disposition`, fmt(s.meanHawk())],
       ["replicator-equation prediction", fmt(s.theoryX)],
-      ["contests", st.contests.toLocaleString()],
-      ["HH / HD / DD", `${Math.round((100 * st.hh) / total)}% / ${Math.round((100 * st.hd) / total)}% / ${Math.round((100 * st.dd) / total)}%`],
-      ["corr(octopamine, hawk)", fmt(st.oaCorrelation())],
+      ["contests · imitations", `${st.contests.toLocaleString()} · ${s.events.imitate.toLocaleString()}`],
+      [`${a}${a} / ${a}${b} / ${b}${b}`, `${Math.round((100 * st.hh) / total)}% / ${Math.round((100 * st.hd) / total)}% / ${Math.round((100 * st.dd) / total)}%`],
+      [`corr(octopamine, ${g.A})`, fmt(st.oaCorrelation())],
       ["deaths: fights / starved / eaten / old", `${s.deaths.fights} / ${s.deaths.starved} / ${s.deaths.eaten} / ${s.deaths.old}`],
       ["births · max generation", `${s.births} · ${Math.max(...s.generation.slice(0, s.n))}`],
     ]);
@@ -280,10 +289,12 @@ export class Panels {
       ctx.setLineDash([]);
     };
     line("ess", css("--muted"), [2, 3], 1);
+    if (hist.length && hist.at(-1).threshold != null) line("threshold", "rgba(255,255,255,0.35)", [1, 4], 1);
     line("theory", css("--accent-2"), [6, 4], 1.5);
     line("observed", "rgba(255,107,74,0.45)", [], 1.5);
     line("played", css("--hawk"), [], 2.2);
-    $("#hawk-legend").innerHTML = `<span><i style="background:var(--hawk)"></i>hawk share played</span><span><i style="background:rgba(255,107,74,.45)"></i>mean disposition</span><span><i style="background:var(--accent-2)"></i>replicator equation</span><span><i style="background:var(--muted)"></i>ESS = V/C</span>`;
+    const g = GAMES[s.params.game];
+    $("#hawk-legend").innerHTML = `<span><i style="background:var(--hawk)"></i>${g.A} share played</span><span><i style="background:rgba(255,107,74,.45)"></i>mean disposition</span><span><i style="background:var(--accent-2)"></i>replicator equation</span><span><i style="background:var(--muted)"></i>ESS it is heading to</span>${hist.at(-1)?.threshold != null ? `<span><i style="background:rgba(255,255,255,.35)"></i>tipping point</span>` : ""}`;
   }
 
   updateGraph() {
@@ -319,7 +330,7 @@ export class Panels {
       ["largest swarm", sizes[0] || 0],
       ["predator targets", sw.biggest ? `swarm of ${sw.biggest.size}` : "–"],
     ]);
-    // swarm sizes coloured by their mean hawk disposition
+    // swarm sizes coloured by their mean disposition toward the selfish option
     const cv = $("#chart-swarms"), ctx = setupCanvas(cv);
     const W = cv.clientWidth, H = cv.clientHeight;
     ctx.clearRect(0, 0, W, H);
@@ -334,7 +345,7 @@ export class Panels {
     });
     ctx.fillStyle = css("--muted");
     ctx.font = "10px Inter, sans-serif";
-    ctx.fillText("swarm sizes (bar colour = mean hawk disposition)", 4, H - 2);
+    ctx.fillText(`swarm sizes (bar colour = mean ${GAMES[s.params.game].A} disposition)`, 4, H - 2);
 
     const total = s.n || 1;
     $("#modes").innerHTML = MODE_NAMES.map(
@@ -367,9 +378,14 @@ export class Panels {
       MN9 proboscis motor neuron, and the fly only gains energy in proportion to MN9 activity (the sugar → MN9 result of Shiu et al. 2024).
       A diving predator drives LPLC2 looming detectors → Giant Fiber → take-off (von Reyn et al. 2014; Ache et al. 2019).
       The heuristic layer's chosen direction is injected into PFL3, which steers through DNa02 (Westeinde et al. 2024; Mussells Pires et al. 2024).
-      Jostling drives Johnston's organ neurons → MDN backing up (Bidaye et al. 2014). Octopaminergic cell types bias the fly toward Hawk (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008).</p>
+      Jostling drives Johnston's organ neurons → MDN backing up (Bidaye et al. 2014). Octopaminergic cell types bias the fly toward the selfish option in the chosen game (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008).</p>
+      <p><b>Games and learning.</b> Flies on food play Hawk–Dove, the Prisoner's Dilemma or the Stag Hunt with expected payoffs. Every ~8 s a fly
+      compares its recent payoff with a graph neighbour's (or anyone's) and copies that fly's disposition with the Fermi probability
+      (Traulsen, Nowak &amp; Pacheco 2006); births are proportional to energy. Losers are jostled but not chased off, and payoffs are scaled
+      so one contest rarely kills: both choices keep pairings random and avoid survivorship bias, so the replicator-equation
+      predictions remain a fair yardstick.</p>
       <p><b>Honest limitations.</b> This is an illustration, not a biophysical model. The reduction lumps neurons by cell type, keeps the
-      strongest ~15 inputs per node, and replaces spiking neurons with a 4-hop rate propagation so hundreds of brains run at 60 fps.
+      strongest ~15 inputs per node, and replaces spiking neurons with a 4-hop rate propagation so hundreds of brains can run in a background Web Worker.
       Lumping removes the sparse coding of the real olfactory system, so odour only sets arousal here; odour-guided search is done by
       the heuristic layer. Game, heuristic and clustering layers are deliberately simple textbook algorithms. A reflex layer prevents collisions.</p>
       <p><b>Data.</b> Connectivity: FlyWire v783 via the edge list published with Shiu et al. (2024) (MIT licence; FlyWire data CC BY 4.0).
@@ -379,7 +395,7 @@ export class Panels {
       ${group("FlyWire connectome & data", ["dorkenwald2024", "schlegel2024", "matsliah2024", "lin2024", "eckstein2024", "buhmann2021", "zheng2018", "berg2026", "tastekin2026", "flywire_zenodo", "flywire_annotations"])}
       ${group("Whole-brain model this builds on", ["shiu2024", "shiu_code"])}
       ${group("Circuits used for behaviour", ["vonreyn2014", "ache2019", "bidaye2014", "bidaye2020", "westeinde2024", "mussellspires2024", "hoyer2008", "zhou2008"])}
-      ${group("Game theory", ["maynardsmith1973", "maynardsmith1982", "taylor1978", "hofbauer1998", "nash1950", "nowak1992", "lieberman2005", "ohtsuki2006", "hamilton1971"])}
+      ${group("Game theory", ["maynardsmith1973", "maynardsmith1982", "taylor1978", "hofbauer1998", "nash1950", "traulsen2006", "nowak1992", "hauert2004", "lieberman2005", "ohtsuki2006", "hamilton1971"])}
       ${group("Heuristics", ["hart1968", "gigerenzer1996", "simon1955", "charnov1976", "reynolds1987"])}
       ${group("Graph theory", ["dijkstra1959", "page1999", "brandes2001", "watts1998", "blondel2008", "newman2004"])}
       ${group("Clustering", ["ester1996", "lloyd1982", "arthur2007", "aloise2009"])}

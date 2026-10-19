@@ -37,6 +37,8 @@ DOIS = {
     "lieberman2005": "10.1038/nature03204",
     "ohtsuki2006": "10.1038/nature04605",
     "hamilton1971": "10.1016/0022-5193(71)90189-5",
+    "traulsen2006": "10.1103/PhysRevE.74.011909",
+    "hauert2004": "10.1038/nature02360",
     # heuristics
     "hart1968": "10.1109/TSSC.1968.300136",
     "gigerenzer1996": "10.1037/0033-295X.103.4.650",

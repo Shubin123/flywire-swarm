@@ -76,6 +76,32 @@ export class Connectome {
   }
 }
 
+// Propagate activity `hops` synapses outward from the drive I for `count`
+// brains (fly-major layout) and write the final hop into `out`.
+// Shared by the main thread and the brain worker.
+export function propagate(cx, I, gains, count, hops, theta, noise, silenced, out) {
+  const { N, inPtr, inSrc, inW } = cx;
+  let a = new Float32Array(N), b = new Float32Array(N);
+  for (let f = 0; f < count; f++) {
+    const o = f * N;
+    const g = gains[f];
+    a.fill(0);
+    for (let h = 0; h < hops; h++) {
+      for (let t = 0; t < N; t++) {
+        let x = I[o + t] - theta;
+        for (let k = inPtr[t], e = inPtr[t + 1]; k < e; k++) x += g * inW[k] * a[inSrc[k]];
+        if (h === hops - 1) x += noise * (Math.random() - 0.5);
+        b[t] = x > 0 ? Math.tanh(x) : 0;
+      }
+      if (silenced) for (const t of silenced) b[t] = 0;
+      const tmp = a;
+      a = b;
+      b = tmp;
+    }
+    out.set(a, o);
+  }
+}
+
 // A population of brains sharing one connectome.
 //
 // Each brain tick, activity is propagated K synaptic hops outward from the
@@ -84,6 +110,9 @@ export class Connectome {
 // within a few hops, and bounding the depth stops the lumped, cell-type-level
 // graph from latching into artificial self-sustained states. The readout R is
 // a leaky average of the propagated activity, giving neurons a time constant.
+//
+// In the browser the propagation runs in a Web Worker (enableWorker); results
+// arrive a tick or so later and are blended into R when they land.
 export class BrainPool {
   constructor(cx, capacity) {
     this.cx = cx;
@@ -91,13 +120,39 @@ export class BrainPool {
     this.N = cx.N;
     this.R = new Float32Array(capacity * this.N); // smoothed activity (what the body and the UI read)
     this.I = new Float32Array(capacity * this.N); // external drive
+    this.P = new Float32Array(capacity * this.N); // last propagated activity
     this.gain = new Float32Array(capacity).fill(9);
     this.hops = 4;
     this.alpha = 0.5; // readout smoothing per tick (~ dt / tau)
     this.theta = 0.05; // firing threshold
     this.noise = 0.03;
-    this.a = new Float32Array(this.N);
-    this.b = new Float32Array(this.N);
+    this.worker = null;
+    this.busy = false;
+  }
+
+  enableWorker(url) {
+    try {
+      this.worker = new Worker(url, { type: "module" });
+    } catch {
+      return false; // fall back to running on the main thread
+    }
+    const { N, inPtr, inSrc, inW } = this.cx;
+    this.worker.postMessage({ init: { N, inPtr, inSrc, inW } });
+    this.worker.onmessage = (e) => {
+      this.busy = false;
+      this.blend(e.data.P, e.data.count);
+    };
+    this.worker.onerror = () => {
+      this.worker.terminate();
+      this.worker = null;
+      this.busy = false;
+    };
+    return true;
+  }
+
+  dispose() {
+    this.worker?.terminate();
+    this.worker = null;
   }
 
   reset(f) {
@@ -123,29 +178,25 @@ export class BrainPool {
   }
 
   step(count, silenced = null) {
-    const { N, R, I, alpha, theta, noise, hops } = this;
-    const { inPtr, inSrc, inW } = this.cx;
-    let a = this.a, b = this.b;
-    for (let f = 0; f < count; f++) {
-      const o = f * N;
-      const g = this.gain[f];
-      a.fill(0);
-      for (let h = 0; h < hops; h++) {
-        for (let t = 0; t < N; t++) {
-          let x = I[o + t] - theta;
-          for (let k = inPtr[t], e = inPtr[t + 1]; k < e; k++) x += g * inW[k] * a[inSrc[k]];
-          if (h === hops - 1) x += noise * (Math.random() - 0.5);
-          b[t] = x > 0 ? Math.tanh(x) : 0;
-        }
-        if (silenced) for (const t of silenced) b[t] = 0;
-        const tmp = a;
-        a = b;
-        b = tmp;
-      }
-      for (let t = 0; t < N; t++) R[o + t] += alpha * (a[t] - R[o + t]);
+    const sil = silenced ? [...silenced] : null;
+    if (this.worker) {
+      if (this.busy) return; // the worker is still on the previous tick
+      this.busy = true;
+      const I = this.I.slice(0, count * this.N);
+      this.worker.postMessage(
+        { I, gains: this.gain.slice(0, count), count, hops: this.hops, theta: this.theta, noise: this.noise, silenced: sil },
+        [I.buffer]
+      );
+      return;
     }
-    this.a = a;
-    this.b = b;
+    propagate(this.cx, this.I, this.gain, count, this.hops, this.theta, this.noise, sil, this.P);
+    this.blend(this.P, count);
+  }
+
+  blend(P, count) {
+    const { R, alpha } = this;
+    const n = Math.min(count * this.N, R.length);
+    for (let k = 0; k < n; k++) R[k] += alpha * (P[k] - R[k]);
   }
 
   // copy the brain state of fly a into fly b (used when flies reproduce)

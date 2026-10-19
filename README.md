@@ -22,25 +22,43 @@ senses ──► sensory neurons ──► reduced FlyWire connectome (618 cell 
 | **LPLC2** looming detectors → **Giant Fiber** (DNp01) | escape take-off when the predator dives |
 | heuristic goal injected into **PFL3** → **DNa02** steering neurons | turning toward the A* waypoint |
 | Johnston's organ (touch) → **MDN** moonwalker neurons | backing away when jostled |
-| octopaminergic (**OA-**) cell types | raise the probability of playing Hawk |
+| octopaminergic (**OA-**) cell types | raise the probability of playing the selfish option (Hawk / Defect / Hare) |
 
 The five ideas and how they connect (all ten pairs are explained, with a live metric, in the **Ideas** tab):
 
 | | Graph theory | Clustering | Game theory | Heuristics |
 |---|---|---|---|---|
-| **Connectome** | the connectome is a weighted digraph: PageRank, betweenness, Louvain, Dijkstra paths | cell types are clusters; k-means on neural activity gives behavioural modes | octopaminergic activity biases Hawk vs Dove | A* goals reach the motor system through PFL3 → DNa02 |
-| **Graph theory** | | DBSCAN swarms ≈ components of the ε-graph; Louvain = graph clustering | contests happen along social-graph edges (evolutionary graph theory) | A* is heuristic graph search (vs Dijkstra) |
+| **Connectome** | the connectome is a weighted digraph: PageRank, betweenness, Louvain, Dijkstra paths | cell types are clusters; k-means on neural activity gives behavioural modes | octopaminergic activity biases the strategy choice | A* goals reach the motor system through PFL3 → DNa02 |
+| **Graph theory** | | DBSCAN swarms ≈ components of the ε-graph; Louvain = graph clustering | contests and strategy copying happen along social-graph edges (evolutionary graph theory) | A* is heuristic graph search (vs Dijkstra) |
 | **Clustering** | | | crowding sets contest rates; predator targets the biggest swarm | k-means is Lloyd's heuristic; "fewer rivals" is a take-the-best cue |
-| **Game theory** | | | | bounded-rational flies still converge on the ESS V/C |
+| **Game theory** | | | | bounded-rational imitators still converge on the ESS |
 
-Things to try: drag **V** and **C** and watch the played Hawk share track V/C; silence **MN9** (flies starve), **Giant Fiber**
-(the predator feasts), **PFL3** (navigation breaks) or **OA-** neurons (fewer hawks); click a fly to see its brain light up.
+### Games and learning
+
+Pick **Hawk–Dove**, the **Prisoner's Dilemma** (donation game) or the **Stag Hunt**. Flies that meet on food play with expected
+payoffs; every ~8 s a fly compares its recent payoff with a graph neighbour's (or anyone's — a toggle) and copies that fly's
+disposition with the Fermi probability (pairwise comparison, Traulsen, Nowak & Pacheco 2006). Births are proportional to energy.
+The Game tab shows the payoff matrix, the stable and unstable rest points of the replicator equation, and the population's path.
+Expected outcomes: Hawk share ≈ V/C in Hawk–Dove, all-Defect in the Prisoner's Dilemma, and whichever side of the tipping point
+1 − C/V the Stag Hunt starts on. Mutation and the finite swarm keep the population near, not exactly on, the analytic line.
+
+Two design choices keep that comparison fair, and both were found by measuring the simulation: losers are jostled but not
+chased off a patch (otherwise winners monopolise patches and pairings stop being random), and payoffs are scaled so that one
+contest rarely kills (otherwise losers die before anyone can learn from their bad payoffs — survivorship bias).
+
+### Things to try
+
+Drag **V** and **C** and watch the played share follow the equilibrium; switch to the Stag Hunt and start on either side of
+the tipping point; silence **MN9** (flies starve), **Giant Fiber** (the predator feasts), **PFL3** (navigation breaks) or **OA-**
+neurons (less selfish play); click a fly to see its brain light up. **Copy link to this setup** puts every setting in the URL,
+so an experiment can be shared, e.g.
+`https://shubin123.github.io/flywire-swarm/?game=stag&V=4&C=1.5&learn=anyone`.
 
 ## Honest limitations
 
 This is an illustration, not a biophysical model. The reduction lumps neurons by cell type and hemisphere, keeps the
-strongest ~15 inputs per node, and replaces spiking neurons with a 4-hop rate propagation so hundreds of brains run at
-60 fps. Lumping removes the sparse coding of the real olfactory system, so odour only sets arousal; odour-guided search is
+strongest ~15 inputs per node, and replaces spiking neurons with a 4-hop rate propagation so hundreds of brains can run in
+a background Web Worker. Lumping removes the sparse coding of the real olfactory system, so odour only sets arousal; odour-guided search is
 done by the heuristic layer. The game, heuristic and clustering layers are deliberately simple textbook algorithms, and a
 reflex layer prevents collisions.
 
@@ -72,8 +90,9 @@ Serve the folder with any static server (`python -m http.server`) and open `http
 | File | Role |
 |---|---|
 | `js/connectome.js` | loads the data; batched per-fly brain model |
+| `js/brain-worker.js` | runs the brain propagation off the main thread |
 | `js/sim.js` | the swarm: senses → brain → body, contests, predator, life cycle |
-| `js/game.js` | Hawk–Dove payoffs, replicator equation, statistics |
+| `js/game.js` | 2×2 games (Hawk–Dove, Prisoner's Dilemma, Stag Hunt), equilibria, replicator equation |
 | `js/heuristics.js` | A* on an occupancy grid, take-the-best, satisficing leave rule |
 | `js/graph.js` | PageRank, Louvain, Brandes betweenness, Dijkstra, clustering coefficient, union-find |
 | `js/cluster.js` | spatial hash, DBSCAN, k-means++ |
@@ -163,7 +182,9 @@ The whole-brain computational model that inspired the brain layer is by Philip S
 - Peter D. Taylor, Leo B. Jonker (1978). *Evolutionary stable strategies and game dynamics*. Mathematical Biosciences, 40, 145-156. [doi:10.1016/0025-5564(78)90077-9](https://doi.org/10.1016/0025-5564(78)90077-9)
 - Josef Hofbauer, Karl Sigmund (1998). *Evolutionary Games and Population Dynamics*. Cambridge University Press. [doi:10.1017/CBO9781139173179](https://doi.org/10.1017/CBO9781139173179)
 - John F. Nash (1950). *Equilibrium points in n -person games*. Proceedings of the National Academy of Sciences, 36, 48-49. [doi:10.1073/pnas.36.1.48](https://doi.org/10.1073/pnas.36.1.48)
+- Arne Traulsen, Martin A. Nowak, Jorge M. Pacheco (2006). *Stochastic dynamics of invasion and fixation*. Physical Review E, 74. [doi:10.1103/PhysRevE.74.011909](https://doi.org/10.1103/PhysRevE.74.011909)
 - Martin A. Nowak, Robert M. May (1992). *Evolutionary games and spatial chaos*. Nature, 359, 826-829. [doi:10.1038/359826a0](https://doi.org/10.1038/359826a0)
+- Christoph Hauert, Michael Doebeli (2004). *Spatial structure often inhibits the evolution of cooperation in the snowdrift game*. Nature, 428, 643-646. [doi:10.1038/nature02360](https://doi.org/10.1038/nature02360)
 - Erez Lieberman, Christoph Hauert, Martin A. Nowak (2005). *Evolutionary dynamics on graphs*. Nature, 433, 312-316. [doi:10.1038/nature03204](https://doi.org/10.1038/nature03204)
 - Hisashi Ohtsuki, Christoph Hauert, Erez Lieberman, Martin A. Nowak (2006). *A simple rule for the evolution of cooperation on graphs and social networks*. Nature, 441, 502-505. [doi:10.1038/nature04605](https://doi.org/10.1038/nature04605)
 - W.D. Hamilton (1971). *Geometry for the selfish herd*. Journal of Theoretical Biology, 31, 295-311. [doi:10.1016/0022-5193(71)90189-5](https://doi.org/10.1016/0022-5193(71)90189-5)

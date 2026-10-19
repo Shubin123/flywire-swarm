@@ -67,13 +67,23 @@
       </section>
 
       <section>
-        <h3>Game theory · Hawk–Dove</h3>
-        <label class="slider">Value of food bout V <output id="o-V">2.0</output>
+        <h3>Game theory</h3>
+        <div class="seg" id="seg-game">
+          <button data-v="hawkdove" class="on">Hawk–Dove</button>
+          <button data-v="pd" title="Prisoner's Dilemma">Dilemma</button>
+          <button data-v="stag">Stag Hunt</button>
+        </div>
+        <label class="slider"><span id="lbl-V">Value of food bout V</span> <output id="o-V">2.0</output>
           <input id="r-V" type="range" min="0.5" max="6" step="0.1" value="2" /></label>
-        <label class="slider">Cost of fighting C <output id="o-C">5.0</output>
+        <label class="slider"><span id="lbl-C">Cost of fighting C</span> <output id="o-C">5.0</output>
           <input id="r-C" type="range" min="0.5" max="12" step="0.1" value="5" /></label>
         <label class="slider">Mutation <output id="o-mut">0.25</output>
           <input id="r-mut" type="range" min="0" max="1" step="0.01" value="0.25" /></label>
+        <h3 style="margin-top:12px">Flies copy strategies from</h3>
+        <div class="seg" id="seg-learn">
+          <button data-v="neighbours" class="on">Graph neighbours</button>
+          <button data-v="anyone">Anyone</button>
+        </div>
       </section>
 
       <section>
@@ -105,6 +115,7 @@
         <label class="check"><input id="c-path" type="checkbox" checked /> A* route of selected fly</label>
         <label class="check"><input id="c-paths-all" type="checkbox" /> A* routes of all flies</label>
       </section>
+      <button id="btn-share" class="btn wide">Copy link to this setup</button>
       <button id="btn-reset" class="btn wide">Restart simulation</button>
     </aside>
 
@@ -140,11 +151,14 @@
         <canvas id="chart-hawk" height="170"></canvas>
         <div class="chart-legend" id="hawk-legend"></div>
         <div id="game-stats" class="kv"></div>
-        <p class="note">Each fly carries a heritable hawk disposition. Whether it actually escalates also depends on
-          the activity of octopaminergic (OA-) cell types in its own connectome — octopamine promotes aggression in flies
-          (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008). Flies reproduce in proportion to energy, so the population follows
-          replicator dynamics (Taylor &amp; Jonker 1978) toward the evolutionarily stable mix <b>V/C</b>
-          (Maynard Smith &amp; Price 1973).</p>
+        <p class="note" id="game-about"></p>
+        <p class="note">Each fly carries a heritable disposition toward the selfish option (Hawk / Defect / Hare). Whether it
+          actually plays it also depends on the activity of octopaminergic (OA-) cell types in its own connectome —
+          octopamine promotes aggression in flies (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008). Every ~8 s a fly compares its
+          recent payoff with another fly's and copies that fly's disposition with the Fermi probability
+          (Traulsen, Nowak &amp; Pacheco 2006), so the population follows replicator dynamics (Taylor &amp; Jonker 1978) toward an
+          evolutionarily stable state (Maynard Smith &amp; Price 1973). Mutation and the finite swarm keep it near, not exactly on,
+          the analytic line. Copying only from graph neighbours can shift the outcome (Hauert &amp; Doebeli 2004).</p>
       </div>
 
       <div class="tab" id="tab-graph">

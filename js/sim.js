@@ -11,7 +11,7 @@
 import { BrainPool } from "./connectome.js";
 import { NavGrid, takeTheBest, shouldLeave } from "./heuristics.js";
 import { SpatialHash, dbscan, kmeans } from "./cluster.js";
-import { hawkDovePayoff, replicatorStep, essHawk, GameStats } from "./game.js";
+import { GAMES, payoffs, replicatorStep, attractor, equilibria, GameStats } from "./game.js";
 import { UnionFind, avgClustering } from "./graph.js";
 
 export const ARENA = 120;
@@ -39,9 +39,13 @@ export class Sim {
     this.cap = 400;
     this.n = opts.flies ?? 220;
     this.params = {
-      V: 2, // value of a contested food bout (energy)
-      C: 5, // cost of an escalated fight
+      game: "hawkdove",
+      V: 2, // first payoff parameter (value of the food bout in Hawk-Dove)
+      C: 5, // second payoff parameter (cost of fighting in Hawk-Dove)
       mutation: 0.25,
+      selection: 2, // intensity of selection in payoff comparisons
+      learnFrom: "neighbours", // copy strategies from social-graph neighbours or from anyone
+      payoffEnergy: 0.3, // energy gained per unit of game payoff
       predator: true,
       gain: 9,
       aspiration: 0.12, // satisficing intake threshold
@@ -81,7 +85,7 @@ export class Sim {
     Object.assign(this, {
       x: F32(), z: F32(), y: F32(), h: F32(), speed: F32(), vy: F32(), energy: F32(), age: F32(), life: F32(),
       hawkGene: F32(), gainGene: F32(), intake: F32(), wing: F32(), escape: F32(), cooldown: F32(), decide: F32(),
-      oa: F32(), residence: F32(), lastHawk: new Int8Array(c).fill(-1), target: new Int16Array(c).fill(-1), reason: new Array(c).fill(""),
+      oa: F32(), residence: F32(), payoff: F32(), played: new Int32Array(c), lastHawk: new Int8Array(c).fill(-1), target: new Int16Array(c).fill(-1), reason: new Array(c).fill(""),
       path: new Array(c).fill(null), pathIdx: new Int16Array(c), swarm: new Int32Array(c).fill(-1),
       mode: new Int8Array(c), comp: new Int32Array(c), degree: new Int16Array(c), generation: new Int32Array(c),
       feeding: new Uint8Array(c), parent: new Int32Array(c).fill(-1), id: new Int32Array(c),
@@ -99,7 +103,7 @@ export class Sim {
     this.swarms = { count: 0, noise: 0, sizes: [], hawk: [] };
     this.social = { edges: 0, components: 0, giant: 0, clustering: 0, avgDegree: 0, leaders: [] };
     this.astarStats = { astar: 0, dijkstra: 0, samples: 0 };
-    this.events = { contest: 0, astar: 0, escape: 0, birth: 0, feed: 0 };
+    this.events = { contest: 0, astar: 0, escape: 0, birth: 0, feed: 0, imitate: 0 };
     this.tmp = [];
   }
 
@@ -150,7 +154,7 @@ export class Sim {
     } else {
       this.x[i] = this.x[parent] + (R() - 0.5) * 3;
       this.z[i] = this.z[parent] + (R() - 0.5) * 3;
-      this.hawkGene[i] = this.hawkGene[parent] + gauss(R) * P.mutation * 2;
+      this.hawkGene[i] = this.hawkGene[parent] + gauss(R) * P.mutation * 0.6;
       this.gainGene[i] = Math.min(1.4, Math.max(0.7, this.gainGene[parent] + gauss(R) * P.mutation * 0.1));
       this.generation[i] = this.generation[parent] + 1;
       this.parent[i] = this.id[parent];
@@ -166,6 +170,8 @@ export class Sim {
     this.life[i] = 70 + R() * 70;
     this.intake[i] = 0.3;
     this.residence[i] = 0;
+    this.payoff[i] = 0;
+    this.played[i] = 0;
     this.escape[i] = 0;
     this.cooldown[i] = 0;
     this.decide[i] = R();
@@ -176,9 +182,20 @@ export class Sim {
     this.wing[i] = R() * TAU;
   }
 
+  // heritable probability of choosing strategy A; steep so that flies are mostly
+  // one type, as in the replicator equation's population of pure strategists
+  disposition(i) {
+    return sigmoid(4 * this.hawkGene[i]);
+  }
+
+  // probability of actually choosing A now: disposition shifted by octopaminergic arousal
+  choiceProb(i) {
+    return sigmoid(4 * this.hawkGene[i] + 3 * (this.oa[i] - 0.05));
+  }
+
   meanHawk() {
     let s = 0;
-    for (let i = 0; i < this.n; i++) s += sigmoid(this.hawkGene[i]);
+    for (let i = 0; i < this.n; i++) s += this.disposition(i);
     return this.n ? s / this.n : 0;
   }
 
@@ -188,9 +205,8 @@ export class Sim {
     this.n = n;
   }
 
+  // energy-proportional choice among the living for births
   pickParent() {
-    // fitness-proportional choice among the living (birth-death process whose
-    // expected dynamics follow the replicator equation)
     let total = 0;
     for (let i = 0; i < this.n; i++) total += Math.max(0, this.energy[i]);
     if (total <= 0) return Math.floor(this.rng() * this.n);
@@ -200,6 +216,36 @@ export class Sim {
       if (r <= 0) return i;
     }
     return this.n - 1;
+  }
+
+  // Social learning along the proximity graph: a fly compares its recent game
+  // payoff with a random neighbour's and copies the neighbour's disposition with
+  // the Fermi probability 1 / (1 + exp(-s (pi_j - pi_i))) (pairwise comparison,
+  // Traulsen, Nowak & Pacheco 2006). In large populations this follows the
+  // replicator equation, so the analytic equilibria still apply.
+  imitate() {
+    const P = this.params, adj = this.adj;
+    if (!adj || P.learnFrom === "none") return;
+    // each fly reconsiders about once every 8 s, slower than its payoff memory turns over
+    const expected = this.n * DT / 8;
+    const tries = Math.floor(expected) + (this.rng() < expected % 1 ? 1 : 0);
+    for (let t = 0; t < tries; t++) {
+      const i = Math.floor(this.rng() * this.n);
+      if (this.played[i] < 2) continue;
+      let j;
+      if (P.learnFrom === "anyone") j = Math.floor(this.rng() * this.n); // well-mixed population
+      else {
+        const nb = adj[i]; // neighbours on the social graph
+        if (!nb || !nb.length) continue;
+        j = nb[Math.floor(this.rng() * nb.length)];
+      }
+      if (this.played[j] < 2) continue;
+      const pCopy = 1 / (1 + Math.exp(-P.selection * (this.payoff[j] - this.payoff[i])));
+      if (this.rng() < pCopy) {
+        this.hawkGene[i] = this.hawkGene[j] + gauss(this.rng) * P.mutation * 0.2;
+        this.events.imitate++;
+      }
+    }
   }
 
   odorAt(x, z) {
@@ -460,6 +506,7 @@ export class Sim {
     }
 
     this.contests();
+    this.imitate();
     this.updatePredator();
     this.lifeCycle();
     this.updatePatches();
@@ -488,38 +535,39 @@ export class Sim {
       for (const q of nb) if (q !== i && this.cooldown[q] <= 0 && this.y[q] < 0.6) { j = q; break; }
       if (j < 0) continue;
       // each fly's strategy = heritable disposition + octopaminergic arousal of its own connectome
-      const pi = sigmoid(this.hawkGene[i] + 4 * (this.oa[i] - 0.15));
-      const pj = sigmoid(this.hawkGene[j] + 4 * (this.oa[j] - 0.15));
+      const pi = this.choiceProb(i);
+      const pj = this.choiceProb(j);
       const hi = this.rng() < pi, hj = this.rng() < pj;
       this.stats.noteChoice(this.oa[i], hi);
       this.stats.noteChoice(this.oa[j], hj);
-      let [ai, aj] = hawkDovePayoff(hi, hj, P.V, P.C);
-      if (hi && hj) {
-        // escalated fight: a random winner takes V, the loser pays C (expected (V-C)/2 each)
-        const iWins = this.rng() < 0.5;
-        ai = iWins ? P.V : -P.C;
-        aj = iWins ? -P.C : P.V;
-      }
-      this.energy[i] += ai;
-      this.energy[j] += aj;
+      const m = GAMES[P.game].matrix(P.V, P.C);
+      // expected payoffs, as in the replicator equation (an escalated Hawk-Hawk fight
+      // costs each fly (V - C) / 2 on average; a random winner would add survivorship bias)
+      const [ai, aj] = payoffs(m, hi, hj);
+      // payoffs are energy, scaled so that a single bad contest rarely kills: if
+      // fights killed outright, losers' payoffs would vanish before anyone could
+      // learn from them (survivorship bias) and the population would overshoot
+      this.energy[i] += P.payoffEnergy * ai;
+      this.energy[j] += P.payoffEnergy * aj;
+      // running mean payoff per contest (window of ~8 contests)
+      this.payoff[i] += (ai - this.payoff[i]) / Math.min(8, ++this.played[i]);
+      this.payoff[j] += (aj - this.payoff[j]) / Math.min(8, ++this.played[j]);
       if (this.energy[i] <= 0) this.energy[i] = -2; // killed in a fight
       if (this.energy[j] <= 0) this.energy[j] = -2;
       const contested = this.patches[pk];
-      contested.sugar = Math.max(0, contested.sugar - P.V * 0.004); // the prize is food from the patch
+      contested.sugar = Math.max(0, contested.sugar - (Math.max(0, ai) + Math.max(0, aj)) * 0.002); // payoffs are food from the patch
       this.lastHawk[i] = hi ? 1 : 0;
       this.lastHawk[j] = hj ? 1 : 0;
       this.stats.record(hi, hj);
       this.events.contest++;
-      // the loser is displaced (and feels it through its mechanosensory neurons)
+      // the loser is jostled (felt through its mechanosensory neurons) but is not
+      // chased off: forced displacement would let winners monopolise patches, so
+      // newcomers would meet them more often than random pairing assumes
       const loser = ai < aj ? i : aj < ai ? j : -1;
       if (loser >= 0) {
         B.setInput(loser, io.mech[0], 1);
         B.setInput(loser, io.mech[1], 1);
-        this.target[loser] = -1;
-        this.decide[loser] = 0;
-        this.reason[loser] = "lost a contest";
-        this.vy[loser] = 4;
-        this.h[loser] = Math.atan2(this.z[loser] - this.z[loser === i ? j : i], this.x[loser] - this.x[loser === i ? j : i]);
+        this.vy[loser] = 2;
       }
       this.cooldown[i] = this.cooldown[j] = 1.5;
     }
@@ -630,6 +678,7 @@ export class Sim {
       if (!lead.has(r) || this.degree[i] > this.degree[lead.get(r)]) lead.set(r, i);
     }
     this.socialEdges = edges;
+    this.adj = adj;
     this.social = {
       edges: edges.length / 2,
       components: size.size,
@@ -654,7 +703,7 @@ export class Sim {
         continue;
       }
       sizes[labels[i]]++;
-      hawk[labels[i]] += sigmoid(this.hawkGene[i]);
+      hawk[labels[i]] += this.disposition(i);
       cx[labels[i]] += this.x[i];
       cz[labels[i]] += this.z[i];
     }
@@ -713,12 +762,25 @@ export class Sim {
   recordHistory() {
     const P = this.params;
     const observed = this.meanHawk();
-    for (let s = 0; s < 15; s++) this.theoryX = replicatorStep(this.theoryX, P.V, P.C, DT * 0.4);
+    const m = GAMES[P.game].matrix(P.V, P.C);
+    // normalise by payoff scale so every game relaxes at a comparable, readable speed
+    const scale = Math.abs(m[0][0]) + Math.abs(m[0][1]) + Math.abs(m[1][0]) + Math.abs(m[1][1]) + 1e-9;
+    for (let s = 0; s < 15; s++) this.theoryX = replicatorStep(this.theoryX, m, (DT * 1.8) / scale);
+    const eq = equilibria(m);
     this.history.push({
-      t: this.t, observed, theory: this.theoryX, ess: essHawk(P.V, P.C),
+      t: this.t, observed, theory: this.theoryX, ess: attractor(m, observed),
+      threshold: eq.unstable.find((u) => u > 0 && u < 1) ?? null,
       played: this.stats.played(), n: this.n, energy: this.meanEnergy(),
     });
     if (this.history.length > 600) this.history.shift();
+  }
+
+  // switch game; the analytic reference restarts from the current population
+  setGame(game, V, C) {
+    Object.assign(this.params, { game, V, C });
+    this.theoryX = this.meanHawk();
+    this.stats = new GameStats();
+    this.history = [];
   }
 
   meanEnergy() {
