@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: "If you use this demo, please cite the FlyWire papers and the data sources listed under references."
+title: "FlyWire Swarm: a browser-only swarm of connectome-driven flies"
+type: software
+authors:
+  - name: "Shubin"
+license: MIT
+repository-code: "https://github.com/Shubin123/flywire-swarm"
+url: "https://shubin123.github.io/flywire-swarm/"
+references:
+  - type: article
+    title: "Neuronal wiring diagram of an adult brain"
+    authors:
+      - family-names: Dorkenwald
+        given-names: Sven
+      - name: "FlyWire Consortium"
+    journal: Nature
+    volume: 634
+    start: 124
+    end: 138
+    year: 2024
+    doi: 10.1038/s41586-024-07558-y
+  - type: article
+    title: "Whole-brain annotation and multi-connectome cell typing of Drosophila"
+    authors:
+      - family-names: Schlegel
+        given-names: Philipp
+    journal: Nature
+    volume: 634
+    start: 139
+    end: 152
+    year: 2024
+    doi: 10.1038/s41586-024-07686-5
+  - type: article
+    title: "A Drosophila computational brain model reveals sensorimotor processing"
+    authors:
+      - family-names: Shiu
+        given-names: Philip K.
+    journal: Nature
+    volume: 634
+    start: 210
+    end: 219
+    year: 2024
+    doi: 10.1038/s41586-024-07763-9
+  - type: data
+    title: "FlyWire Whole-brain Connectome Connectivity Data"
+    authors:
+      - name: "FlyWire Consortium"
+    year: 2024
+    doi: 10.5281/zenodo.10676866
+    license: CC-BY-4.0

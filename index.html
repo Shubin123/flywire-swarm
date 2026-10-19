@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FlyWire Swarm</title>
+  <meta name="description" content="A browser-only Three.js swarm of flies, each running a reduced copy of the FlyWire whole-brain connectome, linked to game theory, heuristics, graph theory and clustering." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><ellipse cx='32' cy='36' rx='9' ry='16' fill='%23f2a541'/><ellipse cx='18' cy='26' rx='13' ry='7' fill='%2399c9ff' opacity='.8'/><ellipse cx='46' cy='26' rx='13' ry='7' fill='%2399c9ff' opacity='.8'/><circle cx='32' cy='18' r='7' fill='%23c4472b'/></svg>" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="loader">
+    <div class="loader-card">
+      <div class="loader-title">FlyWire Swarm</div>
+      <div id="loader-msg">Loading the FlyWire v783 connectome…</div>
+      <div class="loader-bar"><div id="loader-fill"></div></div>
+    </div>
+  </div>
+
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-title">FlyWire Swarm</span>
+      <span class="brand-sub">each fly runs a reduced copy of the adult <i>Drosophila</i> connectome</span>
+    </div>
+    <div class="top-actions">
+      <button id="btn-pause" class="btn" title="Pause / resume (space)">Pause</button>
+      <label class="speed">Speed
+        <select id="sel-speed">
+          <option value="0.5">½×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </label>
+      <button id="btn-left" class="btn ghost" aria-pressed="true">Controls</button>
+      <button id="btn-right" class="btn ghost" aria-pressed="true">Panels</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <div id="stage" aria-label="3D swarm view"></div>
+
+    <div id="legend" class="glass"></div>
+    <div id="flycard" class="glass hidden"></div>
+    <div id="hint" class="glass">Click a fly to read its brain · drag to orbit · scroll to zoom</div>
+
+    <aside id="left" class="panel glass">
+      <section>
+        <h3>Colour flies by</h3>
+        <div class="seg" id="seg-color">
+          <button data-v="strategy" class="on">Strategy</button>
+          <button data-v="swarm">Swarm</button>
+          <button data-v="mode">Behaviour</button>
+          <button data-v="energy">Energy</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Game theory · Hawk–Dove</h3>
+        <label class="slider">Value of food bout V <output id="o-V">2.0</output>
+          <input id="r-V" type="range" min="0.5" max="6" step="0.1" value="2" /></label>
+        <label class="slider">Cost of fighting C <output id="o-C">5.0</output>
+          <input id="r-C" type="range" min="0.5" max="12" step="0.1" value="5" /></label>
+        <label class="slider">Mutation <output id="o-mut">0.25</output>
+          <input id="r-mut" type="range" min="0" max="1" step="0.01" value="0.25" /></label>
+      </section>
+
+      <section>
+        <h3>Swarm</h3>
+        <label class="slider">Flies <output id="o-n">220</output>
+          <input id="r-n" type="range" min="20" max="400" step="10" value="220" /></label>
+        <label class="slider">Connectome gain <output id="o-gain">9.0</output>
+          <input id="r-gain" type="range" min="4" max="14" step="0.5" value="9" /></label>
+        <label class="check"><input id="c-pred" type="checkbox" checked /> Predator (swoops at the biggest swarm)</label>
+      </section>
+
+      <section>
+        <h3>Clustering</h3>
+        <label class="slider">DBSCAN ε <output id="o-eps">3.5</output>
+          <input id="r-eps" type="range" min="1.5" max="8" step="0.5" value="3.5" /></label>
+        <label class="slider">DBSCAN minPts <output id="o-min">4</output>
+          <input id="r-min" type="range" min="2" max="12" step="1" value="4" /></label>
+      </section>
+
+      <section>
+        <h3>In-silico silencing</h3>
+        <p class="note">Zero a cell type in every fly's connectome, as Shiu et al. (2024) did in their whole-brain model.</p>
+        <div id="silence"></div>
+      </section>
+
+      <section>
+        <h3>Overlays</h3>
+        <label class="check"><input id="c-social" type="checkbox" checked /> Social graph edges</label>
+        <label class="check"><input id="c-path" type="checkbox" checked /> A* route of selected fly</label>
+        <label class="check"><input id="c-paths-all" type="checkbox" /> A* routes of all flies</label>
+      </section>
+      <button id="btn-reset" class="btn wide">Restart simulation</button>
+    </aside>
+
+    <aside id="right" class="panel glass">
+      <nav class="tabs" role="tablist">
+        <button data-tab="brain" class="on">Brain</button>
+        <button data-tab="game">Game</button>
+        <button data-tab="graph">Graphs</button>
+        <button data-tab="cluster">Clusters</button>
+        <button data-tab="ideas">Ideas</button>
+        <button data-tab="about">Cite</button>
+      </nav>
+
+      <div class="tab on" id="tab-brain">
+        <div id="brain-wrap">
+          <div id="brain-view"></div>
+          <div class="brain-tools">
+            <div class="seg small" id="seg-brain">
+              <button data-v="activity" class="on">Activity</button>
+              <button data-v="community">Louvain</button>
+              <button data-v="pagerank">PageRank</button>
+              <button data-v="class">Class</button>
+            </div>
+            <button id="btn-brain-full" class="btn ghost small" title="Expand">⤢</button>
+          </div>
+        </div>
+        <p class="note" id="brain-caption"></p>
+        <div id="io-bars"></div>
+      </div>
+
+      <div class="tab" id="tab-game">
+        <div id="payoff"></div>
+        <canvas id="chart-hawk" height="170"></canvas>
+        <div class="chart-legend" id="hawk-legend"></div>
+        <div id="game-stats" class="kv"></div>
+        <p class="note">Each fly carries a heritable hawk disposition. Whether it actually escalates also depends on
+          the activity of octopaminergic (OA-) cell types in its own connectome — octopamine promotes aggression in flies
+          (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008). Flies reproduce in proportion to energy, so the population follows
+          replicator dynamics (Taylor &amp; Jonker 1978) toward the evolutionarily stable mix <b>V/C</b>
+          (Maynard Smith &amp; Price 1973).</p>
+      </div>
+
+      <div class="tab" id="tab-graph">
+        <h4>Connectome graph</h4>
+        <div id="cx-stats" class="kv"></div>
+        <div class="cols">
+          <div><h5>PageRank</h5><ol id="top-pr" class="rank"></ol></div>
+          <div><h5>Betweenness</h5><ol id="top-bc" class="rank"></ol></div>
+        </div>
+        <h5>Strongest sensorimotor paths (Dijkstra, cost = 1/log synapses)</h5>
+        <div id="paths"></div>
+        <h4>Social proximity graph</h4>
+        <div id="social-stats" class="kv"></div>
+        <h4>A* versus Dijkstra</h4>
+        <div id="astar-stats" class="kv"></div>
+      </div>
+
+      <div class="tab" id="tab-cluster">
+        <h4>DBSCAN swarms</h4>
+        <div id="db-stats" class="kv"></div>
+        <canvas id="chart-swarms" height="110"></canvas>
+        <h4>k-means behavioural modes</h4>
+        <p class="note">k-means++ on each fly's standardised descending-neuron and neuromodulator activity
+          (steering, MN9 feeding, Giant Fiber escape, octopamine/MDN arousal). Clusters are named by their most
+          over-expressed feature.</p>
+        <div id="modes"></div>
+        <h4>Louvain modules of the connectome</h4>
+        <div id="louvain"></div>
+      </div>
+
+      <div class="tab" id="tab-ideas">
+        <p class="note">Every pair of ideas is wired together in the simulation. Click a node or a link.</p>
+        <svg id="ideas-svg" viewBox="0 0 400 360" role="img" aria-label="Concept map linking five ideas"></svg>
+        <div id="ideas-detail"></div>
+      </div>
+
+      <div class="tab" id="tab-about">
+        <div id="about"></div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
