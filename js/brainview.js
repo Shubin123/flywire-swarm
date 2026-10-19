@@ -18,8 +18,8 @@ export const CLASS_COLORS = {
   unknown: "#888888",
 };
 
-const S = 12; // world size of the brain
-const LABELS = [
+export const S = 12; // world size of the brain
+export const LABELS = [
   ["sugar", 1, "sugar GRN"], ["loom", 0, "LPLC2"], ["pfl3", 0, "PFL3"], ["dna02", 1, "DNa02"],
   ["gf", 0, "Giant Fiber"], ["mn9", 1, "MN9"], ["mdn", 0, "MDN"], ["orn", 1, "ORN"],
 ];
@@ -31,7 +31,7 @@ const RAMP = [
   [0.7, 1.0, 0.52, 0.1],
   [1, 1.0, 0.95, 0.6],
 ];
-function ramp(a, out) {
+export function ramp(a, out) {
   a = Math.max(0, Math.min(1, a));
   let k = 1;
   while (k < RAMP.length - 1 && a > RAMP[k][0]) k++;
@@ -40,20 +40,29 @@ function ramp(a, out) {
   return out.setRGB(r0 + (r1 - r0) * t, g0 + (g1 - g0) * t, b0 + (b1 - b0) * t);
 }
 
-function toWorld(px, py, pz, out) {
+export function toWorld(px, py, pz, out) {
   // FlyWire: x = left→right, y = dorsal→ventral, z = anterior→posterior
   return out.set(px * S, -py * S, -pz * S * 1.6);
 }
 
 export class BrainView {
-  constructor(el, cx, neurons, analysis) {
+  // kind: "webgl" (GLSL point shader) or "webgpu" (the same look as a node material)
+  static async create(el, cx, neurons, analysis, kind) {
+    if (kind !== "webgpu") return new BrainView(el, cx, neurons, analysis, null);
+    const [webgpu, tsl] = await Promise.all([import("three/webgpu"), import("three/tsl")]);
+    const renderer = new webgpu.WebGPURenderer({ antialias: true });
+    await renderer.init();
+    return new BrainView(el, cx, neurons, analysis, { renderer, PointsNodeMaterial: webgpu.PointsNodeMaterial, tsl });
+  }
+
+  constructor(el, cx, neurons, analysis, gpu) {
     this.el = el;
     this.cx = cx;
     this.analysis = analysis;
     this.mode = "activity";
     this.N = cx.N;
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer = gpu ? gpu.renderer : new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(2, devicePixelRatio));
     this.renderer.setClearColor(0x05080c);
     el.appendChild(this.renderer.domElement);
@@ -85,12 +94,13 @@ export class BrainView {
       col.set([c.r, c.g, c.b], 3 * i);
     }
     this.nodeTex = new THREE.DataTexture(new Float32Array(this.N * 4), this.N, 1, THREE.RGBAFormat, THREE.FloatType);
+    this.nodeTex.magFilter = this.nodeTex.minFilter = THREE.NearestFilter; // float textures are not filterable everywhere
     this.nodeTex.needsUpdate = true;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("grp", new THREE.BufferAttribute(grp, 1));
     geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    this.pointsMat = new THREE.ShaderMaterial({
+    this.pointsMat = gpu ? this.nodePointsMaterial(gpu) : new THREE.ShaderMaterial({
       uniforms: {
         nodeTex: { value: this.nodeTex },
         N: { value: this.N },
@@ -133,7 +143,7 @@ export class BrainView {
     this.points = new THREE.Points(geo, this.pointsMat);
     this.scene.add(this.points);
 
-    // --- reduced graph: nodes and edges
+    // --- reduced graph: nodes and edges (plain materials work on both renderers)
     this.nodePos = cx.nodes.map((nd) => toWorld(nd.p[0], nd.p[1], nd.p[2], new THREE.Vector3()));
     this.nodeBase = cx.nodes.map((nd) => new THREE.Color(CLASS_COLORS[nd.sc] || CLASS_COLORS.unknown));
     const sphere = new THREE.SphereGeometry(1, 10, 8);
@@ -180,6 +190,20 @@ export class BrainView {
     this.frame = 0;
     this.setMode("activity");
     this.renderer.domElement.addEventListener("pointerdown", () => (this.controls.autoRotate = false));
+  }
+
+  // WebGPU version of the point shader above. WebGPU draws points 1 px wide, so
+  // the cloud is finer, but colour and opacity follow the same rule.
+  nodePointsMaterial({ PointsNodeMaterial, tsl }) {
+    const { attribute, texture, vec2, float, mix, step } = tsl;
+    const m = new PointsNodeMaterial({ transparent: true, depthWrite: false });
+    const grp = attribute("grp", "float");
+    const base = attribute("color", "vec3");
+    const t = texture(this.nodeTex, vec2(grp.add(0.5).div(this.N), 0.5));
+    const inGraph = float(1).sub(step(65534.5, grp));
+    m.colorNode = mix(base.mul(0.45), mix(base.mul(0.45 * 1.3), t.rgb, t.a), inGraph);
+    m.opacityNode = float(0.35).add(t.a.mul(inGraph).mul(0.6));
+    return m;
   }
 
   setMode(mode) {

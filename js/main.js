@@ -6,6 +6,8 @@ import { loadData, Connectome } from "./connectome.js";
 import { Sim, ARENA } from "./sim.js";
 import { analyseConnectome } from "./analysis.js";
 import { BrainView } from "./brainview.js";
+import { Brain2D } from "./brain2d.js";
+import { CanvasRenderer } from "./canvasview.js";
 import { Panels, MODE_COLORS, swarmColor } from "./panels.js";
 import { IdeasMap } from "./ideas.js";
 import { GAMES } from "./game.js";
@@ -45,17 +47,49 @@ let follow = false;
 
 // ------------------------------------------------------------------ renderer & scene
 const stage = $("#stage");
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+
+// Renderer fallback chain: WebGL → WebGPU → 2D canvas. Recent browsers refuse to
+// create a WebGL context when hardware acceleration is off or the GPU is
+// blocklisted; WebGPU may still work, and the canvas view works everywhere.
+// ?renderer=webgl|webgpu|2d forces a starting point (handy for testing).
+const RENDER_PREF = new URLSearchParams(location.search).get("renderer");
+async function pickRenderer() {
+  if (!RENDER_PREF || RENDER_PREF === "webgl") {
+    try {
+      return [new THREE.WebGLRenderer({ antialias: true }), "webgl"];
+    } catch (err) {
+      console.warn("WebGL unavailable:", err.message);
+    }
+  }
+  if (RENDER_PREF !== "2d" && navigator.gpu) {
+    try {
+      const { WebGPURenderer } = await import("three/webgpu");
+      const r = new WebGPURenderer({ antialias: true });
+      await r.init();
+      if (r.backend?.isWebGPUBackend) return [r, "webgpu"];
+      r.dispose();
+    } catch (err) {
+      console.warn("WebGPU unavailable:", err.message);
+    }
+  }
+  return [new CanvasRenderer(() => ({ sim, settings, selected, flyColor })), "2d"];
+}
+const [renderer, RENDER_KIND] = await pickRenderer();
 renderer.setPixelRatio(Math.min(2, devicePixelRatio));
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
+if (RENDER_KIND !== "2d") {
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+}
 stage.appendChild(renderer.domElement);
 
-// Without hardware acceleration WebGL falls back to a CPU rasteriser that is ~10x slower.
-const glInfo = renderer.getContext().getExtension("WEBGL_debug_renderer_info");
-const glName = glInfo ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL) : "";
-const SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i.test(glName);
-if (SOFTWARE_GL) renderer.setPixelRatio(1);
+// Without hardware acceleration WebGL may fall back to a CPU rasteriser that is ~10x slower.
+let SOFTWARE_GL = false;
+if (RENDER_KIND === "webgl") {
+  const gl = renderer.getContext();
+  const info = gl.getExtension("WEBGL_debug_renderer_info");
+  SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i.test(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : "");
+  if (SOFTWARE_GL) renderer.setPixelRatio(1);
+}
 
 const scene = new THREE.Scene();
 const SKY = new THREE.Color(0x0b0f14);
@@ -440,8 +474,15 @@ function select(i) {
 // The brain view (139k points in a second WebGL context) is built right after the
 // first frame so the swarm appears immediately; until then a stand-in absorbs calls.
 let brain = { mode: "activity", resize() {}, render() {}, setMode(m) { this.mode = m; } };
-function buildBrain() {
-  const real = new BrainView($("#brain-view"), cx, data.neurons, analysis);
+async function buildBrain() {
+  let real;
+  try {
+    real = RENDER_KIND === "2d" ? new Brain2D($("#brain-view"), cx, data.neurons, analysis) : await BrainView.create($("#brain-view"), cx, data.neurons, analysis, RENDER_KIND);
+  } catch (err) {
+    console.warn("3D brain view unavailable, using the canvas version:", err.message);
+    $("#brain-view").replaceChildren();
+    real = new Brain2D($("#brain-view"), cx, data.neurons, analysis);
+  }
   if (brain.mode !== "activity") real.setMode(brain.mode);
   brain = real;
   panels.brain = real;
@@ -618,11 +659,16 @@ new ResizeObserver(resize).observe(stage);
 
 buildWorld();
 resize();
-if (!SOFTWARE_GL) setTimeout(() => ($("#hint").style.opacity = 0), 9000);
-else {
-  $("#hint").textContent = "Hardware acceleration looks off in this browser, so the 3D view will be slow — enable it in browser settings for 60 fps.";
+const RENDER_NOTE = {
+  webgpu: "Rendering with WebGPU (WebGL is unavailable in this browser).",
+  "2d": RENDER_PREF === "2d" ? "2D canvas view (?renderer=2d)." : "Neither WebGL nor WebGPU is available here, so this is a simplified 2D canvas view. Enable hardware acceleration in your browser settings for full 3D.",
+};
+if (SOFTWARE_GL) RENDER_NOTE.webgl = "Hardware acceleration looks off in this browser, so the 3D view will be slow — enable it in browser settings for 60 fps.";
+if (RENDER_NOTE[RENDER_KIND] && !(RENDER_KIND === "webgpu" && RENDER_PREF === "webgpu")) {
+  $("#hint").textContent = RENDER_NOTE[RENDER_KIND];
   $("#hint").style.opacity = 1;
-}
+  setTimeout(() => ($("#hint").style.opacity = 0), 15000);
+} else setTimeout(() => ($("#hint").style.opacity = 0), 9000);
 
 const STEP = 1 / 30;
 let acc = 0, last = performance.now(), uiTimer = 0, started = false;

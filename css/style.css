@@ -69,7 +69,7 @@ body.hide-left #left, body.hide-right #right { display: none; }
 #legend { position: absolute; left: 302px; bottom: 16px; padding: 8px 12px; z-index: 4; font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; max-width: calc(100% - 740px); }
 body.hide-left #legend { left: 16px; }
 #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
-#hint { position: absolute; left: 50%; transform: translateX(-50%); top: 60px; padding: 6px 12px; font-size: 12px; color: var(--muted); z-index: 4; transition: opacity 1s; }
+#hint { position: absolute; left: 50%; transform: translateX(-50%); top: 60px; padding: 6px 12px; font-size: 12px; color: var(--muted); z-index: 4; transition: opacity 1s; max-width: min(520px, calc(100vw - 760px)); min-width: 260px; text-align: center; }
 #flycard { position: absolute; left: 302px; top: 60px; width: 250px; padding: 12px; z-index: 4; font-size: 12px; }
 body.hide-left #flycard { left: 16px; }
 #flycard .kv { margin-top: 6px; }

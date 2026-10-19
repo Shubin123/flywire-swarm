@@ -71,7 +71,7 @@ reflex layer prevents collisions.
   (Schlegel et al. 2024, with updates from Matsliah et al. 2024, Berg et al. 2026 and Tastekin et al. 2026, which the maintainers ask to be cited).
 - `data/` holds derived files only: `neurons.bin` (positions + super-class of all 139,248 neurons), `connectome.json`
   (the reduced graph) and `refs.json` (references, built from Crossref).
-- Code in this repository: MIT (see `LICENSE`). three.js is MIT, © Ricardo Cabello and three.js contributors.
+- Code in this repository: MIT (see `LICENSE`). three.js (r186, loaded from jsDelivr) is MIT, © Ricardo Cabello and three.js contributors.
 
 ### Rebuilding the data
 
@@ -82,6 +82,8 @@ curl -LO https://github.com/flyconnectome/flywire_annotations/raw/main/supplemen
 python tools/build_data.py Connectivity_783.parquet Supplemental_file1_neuron_annotations.tsv data
 python tools/build_refs.py data/refs.json
 ```
+
+Rendering falls back from WebGL to WebGPU to a 2D canvas automatically; add `?renderer=webgpu` or `?renderer=2d` to the URL to force a path.
 
 Serve the folder with any static server (`python -m http.server`) and open `http://localhost:8000`.
 Before deploying, run `python tools/stamp.py`: it versions every script, stylesheet and data file in `index.html` with a
@@ -99,7 +101,8 @@ content hash, so browsers never mix cached old files with new ones.
 | `js/graph.js` | PageRank, Louvain, Brandes betweenness, Dijkstra, clustering coefficient, union-find |
 | `js/cluster.js` | spatial hash, DBSCAN, k-means++ |
 | `js/analysis.js` | start-up analysis of the reduced connectome |
-| `js/main.js`, `js/brainview.js` | three.js swarm and brain renderers |
+| `js/main.js`, `js/brainview.js` | three.js swarm and brain renderers (WebGL, or WebGPU when WebGL is unavailable) |
+| `js/canvasview.js`, `js/brain2d.js` | 2D canvas fallbacks for browsers with neither WebGL nor WebGPU |
 | `js/panels.js`, `js/ideas.js` | side panels, charts, concept map, citations |
 | `tools/` | data reduction, reference builder and `stamp.py` cache-busting |
 
