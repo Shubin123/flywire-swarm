@@ -1,5 +1,7 @@
 // Runs the connectome propagation for every fly off the main thread.
-import { propagate } from "./connectome.js";
+// Module workers do not see the page's import map, so the build version in this
+// worker's own URL (?v=...) is forwarded to keep connectome.js in step.
+const { propagate } = await import(`./connectome.js${self.location.search}`);
 
 let cx = null;
 onmessage = (e) => {

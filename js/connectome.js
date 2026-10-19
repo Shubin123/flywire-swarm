@@ -7,11 +7,17 @@
 // model in Shiu et al. (2024) — far simpler, but small enough to run hundreds
 // of copies at 60 fps in the browser.
 
-export async function loadData(base = "./") {
+export async function loadData(base = "./", version = "") {
+  const q = version ? `?v=${version}` : "";
+  const get = async (name) => {
+    const r = await fetch(`${base}data/${name}${q}`);
+    if (!r.ok) throw new Error(`could not load data/${name} (HTTP ${r.status})`);
+    return r;
+  };
   const [conn, meta, bin] = await Promise.all([
-    fetch(base + "data/connectome.json").then((r) => r.json()),
-    fetch(base + "data/neurons.json").then((r) => r.json()),
-    fetch(base + "data/neurons.bin").then((r) => r.arrayBuffer()),
+    get("connectome.json").then((r) => r.json()),
+    get("neurons.json").then((r) => r.json()),
+    get("neurons.bin").then((r) => r.arrayBuffer()),
   ]);
   const n = meta.count;
   return {

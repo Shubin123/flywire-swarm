@@ -84,6 +84,8 @@ python tools/build_refs.py data/refs.json
 ```
 
 Serve the folder with any static server (`python -m http.server`) and open `http://localhost:8000`.
+Before deploying, run `python tools/stamp.py`: it versions every script, stylesheet and data file in `index.html` with a
+content hash, so browsers never mix cached old files with new ones.
 
 ## Code map
 
@@ -99,7 +101,7 @@ Serve the folder with any static server (`python -m http.server`) and open `http
 | `js/analysis.js` | start-up analysis of the reduced connectome |
 | `js/main.js`, `js/brainview.js` | three.js swarm and brain renderers |
 | `js/panels.js`, `js/ideas.js` | side panels, charts, concept map, citations |
-| `tools/` | data reduction and reference builders |
+| `tools/` | data reduction, reference builder and `stamp.py` cache-busting |
 
 ## Acknowledgements
 

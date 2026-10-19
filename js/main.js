@@ -19,23 +19,26 @@ const setLoad = (msg, frac) => {
 
 // ------------------------------------------------------------------ data
 setLoad("Loading the FlyWire v783 connectome…", 0.1);
+const BUILD = document.querySelector('meta[name="build"]')?.content || "";
 let data, refs;
 try {
-  [data, refs] = await Promise.all([loadData("./"), fetch("./data/refs.json").then((r) => r.json())]);
+  [data, refs] = await Promise.all([
+    loadData("./", BUILD),
+    fetch(`./data/refs.json${BUILD ? "?v=" + BUILD : ""}`).then((r) => r.json()),
+  ]);
 } catch (err) {
-  setLoad("Could not load data files — serve this folder over http(s), not file://", 1);
+  setLoad(`Could not load the data (${err.message}). Serve this folder over http(s), not file://, and try a hard refresh.`, 1);
   throw err;
 }
 setLoad("Analysing the graph (PageRank, betweenness, Louvain)…", 0.5);
-await new Promise((r) => setTimeout(r, 30));
+await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); // let the message paint
 const cx = new Connectome(data.conn);
 const analysis = analyseConnectome(cx);
 setLoad("Hatching flies…", 0.8);
-await new Promise((r) => setTimeout(r, 30));
 
 const settings = { color: "strategy", social: true, path: true, pathsAll: false, speed: 1, paused: false };
 let sim = new Sim(cx, { flies: 220 });
-const WORKER_URL = new URL("./brain-worker.js", import.meta.url);
+const WORKER_URL = new URL(`./brain-worker.js${BUILD ? "?v=" + BUILD : ""}`, import.meta.url);
 sim.brains.enableWorker(WORKER_URL);
 let selected = -1;
 let follow = false;
@@ -47,6 +50,12 @@ renderer.setPixelRatio(Math.min(2, devicePixelRatio));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
+
+// Without hardware acceleration WebGL falls back to a CPU rasteriser that is ~10x slower.
+const glInfo = renderer.getContext().getExtension("WEBGL_debug_renderer_info");
+const glName = glInfo ? renderer.getContext().getParameter(glInfo.UNMASKED_RENDERER_WEBGL) : "";
+const SOFTWARE_GL = /swiftshader|llvmpipe|software|basic render/i.test(glName);
+if (SOFTWARE_GL) renderer.setPixelRatio(1);
 
 const scene = new THREE.Scene();
 const SKY = new THREE.Color(0x0b0f14);
@@ -428,7 +437,16 @@ function select(i) {
 }
 
 // ------------------------------------------------------------------ panels, brain, ideas
-const brain = new BrainView($("#brain-view"), cx, data.neurons, analysis);
+// The brain view (139k points in a second WebGL context) is built right after the
+// first frame so the swarm appears immediately; until then a stand-in absorbs calls.
+let brain = { mode: "activity", resize() {}, render() {}, setMode(m) { this.mode = m; } };
+function buildBrain() {
+  const real = new BrainView($("#brain-view"), cx, data.neurons, analysis);
+  if (brain.mode !== "activity") real.setMode(brain.mode);
+  brain = real;
+  panels.brain = real;
+  real.resize();
+}
 const panels = new Panels({ sim: () => sim, cx, analysis, refs, brain, onFollow: (v) => (follow = v), onDeselect: () => select(-1) });
 const ideas = new IdeasMap($("#ideas-svg"), $("#ideas-detail"), { sim: () => sim, cx, analysis, refs });
 
@@ -600,11 +618,14 @@ new ResizeObserver(resize).observe(stage);
 
 buildWorld();
 resize();
-$("#loader").classList.add("done");
-setTimeout(() => ($("#hint").style.opacity = 0), 9000);
+if (!SOFTWARE_GL) setTimeout(() => ($("#hint").style.opacity = 0), 9000);
+else {
+  $("#hint").textContent = "Hardware acceleration looks off in this browser, so the 3D view will be slow — enable it in browser settings for 60 fps.";
+  $("#hint").style.opacity = 1;
+}
 
 const STEP = 1 / 30;
-let acc = 0, last = performance.now(), uiTimer = 0;
+let acc = 0, last = performance.now(), uiTimer = 0, started = false;
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
@@ -623,6 +644,12 @@ function frame(now) {
   controls.update();
   renderer.render(scene, camera);
   brain.render(sim, selected);
+  if (!started) {
+    // first frame is on screen: drop the loader, then build the brain view
+    started = true;
+    $("#loader").classList.add("done");
+    setTimeout(buildBrain, 50);
+  }
   uiTimer += dt;
   if (uiTimer > 0.25) {
     uiTimer = 0;
