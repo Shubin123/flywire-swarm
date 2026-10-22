@@ -13,8 +13,10 @@ import { NavGrid, takeTheBest, shouldLeave } from "./heuristics.js";
 import { SpatialHash, dbscan, kmeans } from "./cluster.js";
 import { GAMES, payoffs, replicatorStep, attractor, equilibria, GameStats } from "./game.js";
 import { UnionFind, avgClustering } from "./graph.js";
+import { makeRobots, updateRobots, robotLooms } from "./robots.js";
 
 export const ARENA = 120;
+export const CORPSE_LIFE = 6; // seconds a dead fly's body stays on the floor
 const DT = 1 / 30;
 const TAU = Math.PI * 2;
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -22,13 +24,15 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 
 function mulberry32(a) {
-  return () => {
+  const rng = () => {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  rng.state = (v) => (v === undefined ? a : (a = v)); // read or restore, for snapshots
+  return rng;
 }
 
 export const MODE_NAMES = ["Foraging", "Feeding", "Escaping", "Aroused"];
@@ -47,6 +51,8 @@ export class Sim {
       learnFrom: "neighbours", // copy strategies from social-graph neighbours or from anyone
       payoffEnergy: 0.3, // energy gained per unit of game payoff
       predator: true,
+      chasers: 2, // dragonflies that run down single flies, preferring the wounded
+      robots: { picker: true, net: true, shooter: true, stacker: true }, // see robots.js
       gain: 9,
       aspiration: 0.12, // satisficing intake threshold
       socialRadius: 3.5,
@@ -60,7 +66,7 @@ export class Sim {
     this.t = 0;
     this.tick = 0;
     this.births = 0;
-    this.deaths = { starved: 0, eaten: 0, old: 0, fights: 0 };
+    this.deaths = { starved: 0, old: 0, fights: 0, eaten: 0, bitten: 0, picked: 0, netted: 0, shot: 0, swatted: 0 };
 
     this.brains = new BrainPool(cx, this.cap);
     this.calibrate();
@@ -78,12 +84,17 @@ export class Sim {
     for (let i = 0; i < 3; i++) this.patches.push(this.newPatch({ bitter: true }));
     this.grid = new NavGrid(ARENA, 60, this.obstacles);
     this.predator = { x: 0, y: 30, z: 0, vx: 0, vy: 0, vz: 0, mode: "patrol", timer: 6, tx: 0, tz: 0, kills: 0 };
+    this.chasers = [];
+    this.robots = makeRobots(this, R);
+    this.balls = [];
 
     // fly state (structure of arrays)
     const c = this.cap;
     const F32 = () => new Float32Array(c);
     Object.assign(this, {
       x: F32(), z: F32(), y: F32(), h: F32(), speed: F32(), vy: F32(), energy: F32(), age: F32(), life: F32(),
+      hp: F32(), hurt: F32(), // body integrity 0..1 (wounds from fights, predators and robots) and time since the last hit
+      cause: new Array(c).fill(null), killer: new Array(c).fill(null), // why a fly died this tick, and the robot that collects it
       hawkGene: F32(), gainGene: F32(), intake: F32(), wing: F32(), escape: F32(), cooldown: F32(), decide: F32(),
       oa: F32(), residence: F32(), payoff: F32(), played: new Int32Array(c), lastHawk: new Int8Array(c).fill(-1), target: new Int16Array(c).fill(-1), reason: new Array(c).fill(""),
       path: new Array(c).fill(null), pathIdx: new Int16Array(c), swarm: new Int32Array(c).fill(-1),
@@ -91,6 +102,7 @@ export class Sim {
       feeding: new Uint8Array(c), parent: new Int32Array(c).fill(-1), id: new Int32Array(c),
     });
     this.nextId = 0;
+    this.corpses = []; // recently dead flies, falling and lying where they died: { x, y, z, h, vy, age, cause }
     for (let i = 0; i < this.n; i++) this.spawn(i, null);
 
     this.hash = new SpatialHash(Math.max(this.params.socialRadius, this.params.dbEps));
@@ -166,6 +178,10 @@ export class Sim {
     this.speed[i] = 3;
     this.vy[i] = 0;
     this.energy[i] = 4;
+    this.hp[i] = 1;
+    this.hurt[i] = 9;
+    this.cause[i] = null;
+    this.killer[i] = null;
     this.age[i] = 0;
     this.life[i] = 70 + R() * 70;
     this.intake[i] = 0.3;
@@ -208,11 +224,12 @@ export class Sim {
   // energy-proportional choice among the living for births
   pickParent() {
     let total = 0;
-    for (let i = 0; i < this.n; i++) total += Math.max(0, this.energy[i]);
+    const w = (i) => (this.hp[i] > 0 ? Math.max(0, this.energy[i]) : 0); // the dying do not breed
+    for (let i = 0; i < this.n; i++) total += w(i);
     if (total <= 0) return Math.floor(this.rng() * this.n);
     let r = this.rng() * total;
     for (let i = 0; i < this.n; i++) {
-      r -= Math.max(0, this.energy[i]);
+      r -= w(i);
       if (r <= 0) return i;
     }
     return this.n - 1;
@@ -327,6 +344,7 @@ export class Sim {
     }
 
     const pred = this.predator;
+    const looms = robotLooms(this);
     let plans = 0;
     for (let i = 0; i < n; i++) {
       const x = this.x[i], z = this.z[i], h = this.h[i];
@@ -362,6 +380,22 @@ export class Sim {
           if (ang > 0) loomR = size;
           else loomL = size;
         }
+      }
+      // an approaching dragonfly looms too, smaller but much closer
+      for (const c of this.chasers) {
+        const dx = c.x - x, dz = c.z - z, d = Math.hypot(dx, c.y - this.y[i], dz);
+        if (d > 8) continue;
+        const size = clamp01(1.2 / d) * (c.target === i ? 1.3 : 0.7);
+        if (wrap(Math.atan2(dz, dx) - h) > 0) loomR = Math.max(loomR, size);
+        else loomL = Math.max(loomL, size);
+      }
+      // and so do robot tools coming down
+      for (const t of looms) {
+        const dx = t[0] - x, dz = t[2] - z, d = Math.hypot(dx, t[1] - this.y[i], dz);
+        if (d > 6) continue;
+        const size = clamp01(1.5 / d) * 0.8;
+        if (wrap(Math.atan2(dz, dx) - h) > 0) loomR = Math.max(loomR, size);
+        else loomL = Math.max(loomL, size);
       }
       B.setInput(i, io.loom[0], clamp01(loomL));
       B.setInput(i, io.loom[1], clamp01(loomR));
@@ -453,7 +487,8 @@ export class Sim {
       const feeding = onFood && this.y[i] < 0.6 ? mn9 : 0;
       this.residence[i] = pk >= 0 && pk === this.target[i] && this.y[i] < 0.6 ? this.residence[i] + DT : 0;
       this.feeding[i] = feeding > 0.15 ? 1 : 0;
-      let base = 5.5 + 5 * p9 - 6 * mdn;
+      // torn wings: wounded flies are slower, so the predator catches them more easily
+      let base = (5.5 + 5 * p9 - 6 * mdn) * (0.4 + 0.6 * this.hp[i]);
       if (this.target[i] >= 0) {
         const tp = this.patches[this.target[i]];
         const d = Math.hypot(tp.x - x, tp.z - z);
@@ -501,6 +536,8 @@ export class Sim {
       this.intake[i] += (gain / DT - this.intake[i]) * 0.02;
       this.energy[i] = Math.min(12, this.energy[i] + gain - (0.08 + 0.008 * this.speed[i]) * DT);
       this.cooldown[i] -= DT;
+      this.hurt[i] += DT;
+      if (this.hp[i] > 0) this.hp[i] = Math.min(1, this.hp[i] + 0.02 * DT); // wounds heal slowly
       this.age[i] += DT;
       this.wing[i] += (this.y[i] > 0.05 ? 1.6 : 0.15) * (1 + this.speed[i] * 0.05);
     }
@@ -508,7 +545,10 @@ export class Sim {
     this.contests();
     this.imitate();
     this.updatePredator();
+    this.updateChasers();
+    updateRobots(this);
     this.lifeCycle();
+    this.updateCorpses();
     this.updatePatches();
     if (this.tick % 3 === 0) this.socialGraph();
     if (this.tick % 10 === 0) this.swarmClusters();
@@ -552,8 +592,13 @@ export class Sim {
       // running mean payoff per contest (window of ~8 contests)
       this.payoff[i] += (ai - this.payoff[i]) / Math.min(8, ++this.played[i]);
       this.payoff[j] += (aj - this.payoff[j]) / Math.min(8, ++this.played[j]);
-      if (this.energy[i] <= 0) this.energy[i] = -2; // killed in a fight
-      if (this.energy[j] <= 0) this.energy[j] = -2;
+      // an escalated Hawk-Hawk fight also wounds both flies in proportion to C
+      if (P.game === "hawkdove" && hi && hj) {
+        this.wound(i, 0.03 * P.C, "fights");
+        this.wound(j, 0.03 * P.C, "fights");
+      }
+      if (this.energy[i] <= 0) this.cause[i] ??= "fights"; // killed in a fight
+      if (this.energy[j] <= 0) this.cause[j] ??= "fights";
       const contested = this.patches[pk];
       contested.sugar = Math.max(0, contested.sugar - (Math.max(0, ai) + Math.max(0, aj)) * 0.002); // payoffs are food from the patch
       this.lastHawk[i] = hi ? 1 : 0;
@@ -601,11 +646,22 @@ export class Sim {
         p.mode = "patrol";
         p.timer = 10 + this.rng() * 8;
       }
+      // the beak catches what it touches; the wings and the pressure wave of the
+      // dive batter flies further out, at most once per pass
       for (let i = 0; i < this.n; i++) {
-        if (Math.hypot(this.x[i] - p.x, this.y[i] - p.y, this.z[i] - p.z) < 1.4) {
-          this.energy[i] = -1;
-          p.kills++;
+        if (this.hp[i] <= 0) continue;
+        const d = Math.hypot(this.x[i] - p.x, this.y[i] - p.y, this.z[i] - p.z);
+        if (d < 1.4) {
+          this.wound(i, 1, "eaten");
+        } else if (d < 3.5 && this.hurt[i] > 1) {
+          this.wound(i, 0.25 + 0.45 * (1 - d / 3.5), "eaten");
+          // knocked tumbling away from the strike
+          const a = Math.atan2(this.z[i] - p.z, this.x[i] - p.x);
+          this.x[i] += Math.cos(a) * 0.6;
+          this.z[i] += Math.sin(a) * 0.6;
+          this.vy[i] -= 3;
         }
+        if (this.hp[i] <= 0) p.kills++;
       }
     }
     p.vx *= 0.94;
@@ -616,20 +672,108 @@ export class Sim {
     p.z += p.vz * DT * 6;
   }
 
+  // Dragonflies hunt by interception, singling out one fly at a time (Olberg et al.
+  // 2000; Combes et al. 2012); here they favour slow, wounded and isolated flies.
+  updateChasers() {
+    const want = this.params.chasers | 0;
+    while (this.chasers.length < want) {
+      const a = this.rng() * TAU;
+      this.chasers.push({ x: Math.cos(a) * ARENA * 0.48, y: 6, z: Math.sin(a) * ARENA * 0.48, vx: 0, vy: 0, vz: 0, target: -1, retarget: 0, bite: 0, kills: 0 });
+    }
+    this.chasers.length = Math.max(0, want);
+    for (const c of this.chasers) {
+      c.retarget -= DT;
+      c.bite -= DT;
+      if (c.target >= this.n || (c.target >= 0 && this.hp[c.target] <= 0)) c.target = -1;
+      if (c.target < 0 || c.retarget <= 0) {
+        let best = -1, bs = Infinity;
+        for (let i = 0; i < this.n; i++) {
+          const d = Math.hypot(this.x[i] - c.x, this.z[i] - c.z);
+          const score = d * (0.35 + 0.65 * this.hp[i]) * (1 + 0.15 * Math.min(6, this.degree[i]));
+          if (score < bs) (bs = score), (best = i);
+        }
+        c.target = best;
+        c.retarget = 3 + this.rng() * 2;
+      }
+      let ax = 0, ay = (5 - c.y) * 0.5, az = 0;
+      if (c.target >= 0 && c.bite <= 0) {
+        // aim at where the fly will be (proportional navigation, simplified)
+        const i = c.target;
+        const lead = 0.25;
+        const tx = this.x[i] + Math.cos(this.h[i]) * this.speed[i] * lead;
+        const tz = this.z[i] + Math.sin(this.h[i]) * this.speed[i] * lead;
+        const dx = tx - c.x, dy = this.y[i] + 0.2 - c.y, dz = tz - c.z, d = Math.hypot(dx, dy, dz) + 1e-6;
+        ax = (dx / d) * 40;
+        ay = (dy / d) * 40;
+        az = (dz / d) * 40;
+        if (Math.hypot(this.x[i] - c.x, this.y[i] - c.y, this.z[i] - c.z) < 1.1) {
+          c.bite = 1.2; // handling time, then the chase resumes
+          this.vy[i] -= 2;
+          if (this.wound(i, 0.4, "bitten")) {
+            c.kills++;
+            c.target = -1;
+          }
+        }
+      }
+      for (const o of this.obstacles) {
+        const d = Math.hypot(c.x - o.x, c.z - o.z);
+        if (d < o.r + 2 && c.y < 8) (ax += ((c.x - o.x) / d) * 30), (az += ((c.z - o.z) / d) * 30);
+      }
+      c.vx += ax * DT;
+      c.vy += ay * DT;
+      c.vz += az * DT;
+      const sp = Math.hypot(c.vx, c.vy, c.vz), max = 11; // faster than cruising flies, slower than an escape take-off
+      if (sp > max) (c.vx *= max / sp), (c.vy *= max / sp), (c.vz *= max / sp);
+      c.x = Math.max(-ARENA / 2, Math.min(ARENA / 2, c.x + c.vx * DT));
+      c.y = Math.max(0.3, c.y + c.vy * DT);
+      c.z = Math.max(-ARENA / 2, Math.min(ARENA / 2, c.z + c.vz * DT));
+    }
+  }
+
+  // damage a fly's body; at zero health it dies of `cause` (a key of this.deaths)
+  // when lifeCycle() runs. A robot passed as `by` that carries a held[] list
+  // collects the body. Returns true if this blow killed the fly.
+  wound(i, dmg, cause, by = null) {
+    if (this.hp[i] <= 0) return false;
+    this.hp[i] = Math.max(0, this.hp[i] - dmg);
+    this.hurt[i] = 0;
+    if (this.hp[i] > 0) return false;
+    this.cause[i] = cause;
+    this.killer[i] = by;
+    return true;
+  }
+
   lifeCycle() {
     for (let i = 0; i < this.n; i++) {
       const old = this.age[i] > this.life[i];
-      if (this.energy[i] > 0 && !old) continue;
-      if (this.energy[i] === -1) this.deaths.eaten++;
-      else if (this.energy[i] === -2) this.deaths.fights++;
-      else if (old) this.deaths.old++;
-      else this.deaths.starved++;
+      if (this.energy[i] > 0 && this.hp[i] > 0 && !old) continue;
+      const cause = this.cause[i] ?? (this.energy[i] <= 0 ? "starved" : "old");
+      this.deaths[cause]++;
+      // the body drops where the fly died and stays a few seconds; its slot is reused for a newborn
+      this.corpses.push({ x: this.x[i], y: this.y[i], z: this.z[i], h: this.h[i], vy: Math.min(0, this.vy[i]), age: 0, cause });
+      if (this.corpses.length > 150) this.corpses.shift();
+      const by = this.killer[i];
+      if (by && (by.kind === "picker" || by.kind === "net")) {
+        const c = this.corpses.at(-1), r = by.kind === "net" ? 0.9 : 0.2;
+        Object.assign(c, { held: true, ox: (this.rng() - 0.5) * r, oy: -this.rng() * r, oz: (this.rng() - 0.5) * r });
+        by.held.push(c);
+      }
       const parent = this.pickParent();
       if (parent !== i && this.energy[parent] > 2) this.energy[parent] -= 1; // reproduction costs energy
       this.spawn(i, parent === i ? null : parent);
       this.births++;
       this.events.birth++;
     }
+  }
+
+  updateCorpses() {
+    for (const c of this.corpses) {
+      c.age += DT;
+      if (c.held) continue;
+      c.vy -= 20 * DT;
+      c.y = Math.max(0, c.y + c.vy * DT);
+    }
+    while (this.corpses.length && this.corpses[0].age > CORPSE_LIFE && !this.corpses[0].held) this.corpses.shift();
   }
 
   updatePatches() {

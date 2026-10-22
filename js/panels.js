@@ -19,6 +19,12 @@ const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const kv = (rows) => rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
 
+function stackerLine(s) {
+  const R = s.robots.find((r) => r.kind === "stacker");
+  if (!R || !s.params.robots?.stacker) return "off";
+  return `${R.stacked}/16 · ${R.completions} · ${R.knocked} · ${R.bestTime == null ? "–" : R.bestTime.toFixed(0) + " s"}`;
+}
+
 export class Panels {
   constructor({ sim, cx, analysis, refs, brain, onFollow, onDeselect }) {
     this.sim = sim;
@@ -64,8 +70,10 @@ export class Panels {
     if (mode === "strategy")
       html = `<span><i class="sw" style="background:var(--dove)"></i>${g.B}-leaning</span><span><i class="sw" style="background:var(--hawk)"></i>${g.A}-leaning</span><span>flash = contest just played</span>`;
     else if (mode === "swarm") html = `<span>colour = DBSCAN swarm</span><span><i class="sw" style="background:#6b7785"></i>noise</span>`;
+    else if (mode === "health") html = `<span><i class="sw" style="background:hsl(120 85% 54%)"></i>unhurt</span><span><i class="sw" style="background:hsl(60 85% 43%)"></i>wounded</span><span><i class="sw" style="background:hsl(0 85% 32%)"></i>near death</span><span>white flash = hit</span>`;
     else if (mode === "mode") html = MODE_NAMES.map((m, i) => `<span><i class="sw" style="background:${MODE_COLORS[i]}"></i>${m}</span>`).join("");
     else html = `<span><i class="sw" style="background:hsl(0 75% 35%)"></i>starving</span><span><i class="sw" style="background:hsl(120 75% 60%)"></i>well fed</span>`;
+    if (mode !== "health") html += `<span>darker = wounded</span>`;
     html += `<span><i class="sw" style="background:#f2a541"></i>sugar</span><span><i class="sw" style="background:#9a5cff"></i>bitter</span><span>◆ social-graph leader</span>`;
     $("#legend").innerHTML = html;
   }
@@ -88,6 +96,7 @@ export class Panels {
     $("#flycard").innerHTML = `<span class="close" title="Deselect">✕</span>
       <b>Fly #${s.id[i]}</b> <span class="note">gen ${s.generation[i]}${s.parent[i] >= 0 ? ` · parent #${s.parent[i]}` : ""}</span>
       <div class="kv">${kv([
+        ["health", `${Math.round(100 * Math.max(0, s.hp[i]))}%`],
         ["energy", fmt(s.energy[i], 1)],
         [`${g.A} disposition`, fmt(strat)],
         ["recent game payoff", s.played[i] ? fmt(s.payoff[i]) : "–"],
@@ -252,7 +261,10 @@ export class Panels {
       ["contests · imitations", `${st.contests.toLocaleString()} · ${s.events.imitate.toLocaleString()}`],
       [`${a}${a} / ${a}${b} / ${b}${b}`, `${Math.round((100 * st.hh) / total)}% / ${Math.round((100 * st.hd) / total)}% / ${Math.round((100 * st.dd) / total)}%`],
       [`corr(octopamine, ${g.A})`, fmt(st.oaCorrelation())],
-      ["deaths: fights / starved / eaten / old", `${s.deaths.fights} / ${s.deaths.starved} / ${s.deaths.eaten} / ${s.deaths.old}`],
+      ["deaths: fights / starved / old", `${s.deaths.fights} / ${s.deaths.starved} / ${s.deaths.old}`],
+      ["killed by bird / dragonflies", `${s.deaths.eaten} / ${s.deaths.bitten}`],
+      ["robot kills: picked / net / shot / swatted", `${s.deaths.picked} / ${s.deaths.netted} / ${s.deaths.shot} / ${s.deaths.swatted}`],
+      ["stacker: stack · done · knocked · best", stackerLine(s)],
       ["births · max generation", `${s.births} · ${Math.max(...s.generation.slice(0, s.n))}`],
     ]);
     this.chartHawk();

@@ -86,6 +86,8 @@ body.hide-left #flycard { left: 16px; }
 .seg button { flex: 1; background: none; border: 0; border-radius: 6px; padding: 5px 4px; cursor: pointer; color: var(--muted); font-size: 12px; }
 .seg button.on { background: var(--btn-hover); color: var(--text); font-weight: 600; }
 .seg.small button { padding: 3px 6px; font-size: 11px; }
+#seg-color { flex-wrap: wrap; }
+#seg-color button { flex: 1 0 30%; }
 
 /* ---------------------------------------------------------------- tabs */
 .tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; margin: 0 -14px 10px; padding: 10px 10px 0; background: var(--panel-solid); border-bottom: 1px solid var(--line); border-radius: var(--radius) var(--radius) 0 0; }
@@ -180,3 +182,18 @@ table.payoff td { font-family: var(--mono); }
   #btn-left, #btn-right { display: none; }
   .tabs { margin: 0 -14px 10px; overflow-x: auto; }
 }
+
+/* ---------------------------------------------------------------- save panel */
+.save-new { display: flex; gap: 6px; margin: 8px 0; }
+.save-new input { flex: 1; min-width: 0; background: var(--btn); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; color: var(--text); }
+.save-io { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.save-io label.btn { display: inline-block; }
+#save-status.bad { color: var(--bad); }
+.save-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.save-row b { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.save-row small { color: var(--muted); font-size: 11px; }
+.save-acts { display: flex; gap: 4px; flex-shrink: 0; }
+.storage-bar { position: relative; height: 8px; border-radius: 4px; background: var(--btn); overflow: hidden; margin: 6px 0 8px; }
+.storage-bar div { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; }
+.storage-bar .used { background: rgba(92, 200, 255, 0.35); }
+.storage-bar .mine { background: var(--accent-2); }

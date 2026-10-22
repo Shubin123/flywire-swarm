@@ -135,6 +135,21 @@ export class CanvasRenderer {
       ctx.setLineDash([]);
     }
 
+    // dead flies: dark crosses that fade
+    for (const c of sim.corpses) {
+      const p = this.project(c.x, c.y + 0.1, c.z);
+      if (!p) continue;
+      const r = Math.max(1.5, 0.45 * p[2]);
+      ctx.strokeStyle = c.cause === "starved" || c.cause === "old" ? "rgba(90,90,90,0.8)" : "rgba(140,20,20,0.85)";
+      ctx.lineWidth = Math.max(1, 0.2 * p[2]);
+      ctx.beginPath();
+      ctx.moveTo(p[0] - r, p[1] - r);
+      ctx.lineTo(p[0] + r, p[1] + r);
+      ctx.moveTo(p[0] + r, p[1] - r);
+      ctx.lineTo(p[0] - r, p[1] + r);
+      ctx.stroke();
+    }
+
     // flies, far to near
     const order = [];
     for (let i = 0; i < sim.n; i++) order.push(i);
@@ -213,6 +228,37 @@ export class CanvasRenderer {
         ctx.fill();
       }
       this.polygon(this.circle(o.x, 7, o.z, o.r), STONE_TOP);
+    }
+
+    // robots, the stacker's blocks, balls and dragonflies
+    const ROBOT = { picker: "#d98e04", net: "#3fa36b", shooter: "#b84a3a", stacker: "#4a7bd1" };
+    ctx.lineCap = "round";
+    for (const R of sim.robots) {
+      if (!sim.params.robots?.[R.kind]) continue;
+      for (let j = 0; j + 1 < R.pts.length; j++) this.line(R.pts[j], R.pts[j + 1], ROBOT[R.kind], Math.max(2, 4 - j * 0.6));
+      const t = R.pts.at(-1);
+      if (R.kind === "net") this.polygon(this.circle(t[0], t[1], t[2], 1.6, 16), "rgba(159,216,176,0.2)", "#c8d0d8");
+      if (R.kind === "stacker")
+        for (const b of R.blocks) {
+          const p = this.project(b.x, b.y, b.z);
+          if (!p) continue;
+          const h = 0.48 * p[2];
+          ctx.fillStyle = b.state === "stack" ? "#f2c14e" : b.state === "falling" ? "#c0503a" : "#8a6a44";
+          ctx.fillRect(p[0] - h, p[1] - h, 2 * h, 2 * h);
+        }
+    }
+    ctx.fillStyle = "#ffb347";
+    for (const b of sim.balls) {
+      const p = this.project(b.x, b.y, b.z);
+      if (!p) continue;
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], Math.max(1.5, 0.25 * p[2]), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (const c of sim.chasers) {
+      const a = Math.atan2(c.vz, c.vx);
+      this.line([c.x - Math.cos(a) * 2.5, c.y, c.z - Math.sin(a) * 2.5], [c.x + Math.cos(a), c.y, c.z + Math.sin(a)], "#1fa3a3", 3);
+      this.line([c.x - Math.sin(a) * 1.4, c.y, c.z + Math.cos(a) * 1.4], [c.x + Math.sin(a) * 1.4, c.y, c.z - Math.cos(a) * 1.4], "rgba(191,244,255,0.5)", 2);
     }
 
     // predator

@@ -46,6 +46,27 @@ Two design choices keep that comparison fair, and both were found by measuring t
 chased off a patch (otherwise winners monopolise patches and pairings stop being random), and payoffs are scaled so that one
 contest rarely kills (otherwise losers die before anyone can learn from their bad payoffs — survivorship bias).
 
+### Health, predators and robots
+
+Every fly has a health value (0–1) next to its energy. Escalated Hawk–Hawk fights wound both flies in proportion to C,
+the bird's dive batters flies near its path and swallows the one it touches, and dragonflies run down single flies
+(preferring wounded, isolated ones) and bite. Robots, re-implemented after the 6-DOF arm in
+[ArmLab / 6dof-gym-web](https://shubin123.github.io/6dof-gym-web/) (analytic IK targets, a per-tick joint-step cap,
+no going below the floor), share the arena: a **picker** arm grips flies off the food and crushes them, a **net** arm
+sweeps through the densest knot, a **ball turret** lobs balls at flies near the stacker, and a **stacker** arm tries to
+stack 16 blocks while flies knock blocks out of its gripper and stray balls topple its tower. Wounded flies are slower
+and heal slowly. At zero health a fly dies: its body falls, lies (legs up, over a splat) for six seconds, and its slot
+goes to a newborn. Colour by **Health** for green → yellow → red. In every other colouring, wounds darken a fly and a hit
+flashes white. In 300 s runs over three seeds, the robots and dragonflies did not shift the Hawk share away from the ESS
+(0.46 with them, 0.44 without).
+
+### Saving the model
+
+The **Save** tab snapshots the whole model (every fly's body, genes and connectome activity, the RNG state, food,
+predators, robots and statistics), gzips it (~330 KB) and keeps it in the browser's IndexedDB. Snapshots can be loaded
+back, exported or imported as `.json.gz` files, or autosaved every minute. The tab also shows how much storage the project
+and the whole origin use.
+
 ### Things to try
 
 Drag **V** and **C** and watch the played share follow the equilibrium; switch to the Stag Hunt and start on either side of
@@ -95,7 +116,9 @@ content hash, so browsers never mix cached old files with new ones.
 |---|---|
 | `js/connectome.js` | loads the data; batched per-fly brain model |
 | `js/brain-worker.js` | runs the brain propagation off the main thread |
-| `js/sim.js` | the swarm: senses → brain → body, contests, predator, life cycle |
+| `js/sim.js` | the swarm: senses → brain → body, contests, health, predator, dragonflies, life cycle |
+| `js/robots.js` | 6-DOF arms (picker, net, stacker) and the ball turret |
+| `js/snapshot.js`, `js/store.js` | model serialisation; the Save panel (IndexedDB, files, storage usage) |
 | `js/game.js` | 2×2 games (Hawk–Dove, Prisoner's Dilemma, Stag Hunt), equilibria, replicator equation |
 | `js/heuristics.js` | A* on an occupancy grid, take-the-best, satisficing leave rule |
 | `js/graph.js` | PageRank, Louvain, Brandes betweenness, Dijkstra, clustering coefficient, union-find |

@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { loadData, Connectome } from "./connectome.js";
-import { Sim, ARENA } from "./sim.js";
+import { Sim, ARENA, CORPSE_LIFE } from "./sim.js";
 import { analyseConnectome } from "./analysis.js";
 import { BrainView } from "./brainview.js";
 import { Brain2D } from "./brain2d.js";
@@ -11,6 +11,8 @@ import { CanvasRenderer } from "./canvasview.js";
 import { Panels, MODE_COLORS, swarmColor } from "./panels.js";
 import { IdeasMap } from "./ideas.js";
 import { GAMES } from "./game.js";
+import { restore } from "./snapshot.js";
+import { ModelStore } from "./store.js";
 
 const $ = (s) => document.querySelector(s);
 const sigmoid = (x) => 1 / (1 + Math.exp(-x));
@@ -284,12 +286,123 @@ const predator = new THREE.Group();
 }
 scene.add(predator);
 
+// dead flies: bodies on their backs, tinted by what killed them
+const CAUSE_COLORS = { eaten: 0xa01818, bitten: 0xa01818, picked: 0x9a4a12, netted: 0x4f7a44, shot: 0xb0601a, swatted: 0x5a64a8, fights: 0x9a3a22, starved: 0x6a6a6a, old: 0x7a7a7a };
+const VIOLENT = new Set(["eaten", "bitten", "picked", "netted", "shot", "swatted", "fights"]);
+// a dark splat on the floor under flies that were killed, so deaths stay visible
+const splatMesh = new THREE.InstancedMesh(
+  new THREE.CircleGeometry(0.7, 12).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x5a0606, transparent: true, opacity: 0.75, depthWrite: false }),
+  160
+);
+splatMesh.frustumCulled = false;
+splatMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(splatMesh);
+const corpseMesh = new THREE.InstancedMesh(flyBodyGeometry(), new THREE.MeshStandardMaterial({ roughness: 0.9 }), 160);
+corpseMesh.frustumCulled = false;
+corpseMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(corpseMesh);
+
+// dragonflies: long abdomen, two pairs of glassy wings
+const chaserMeshes = [];
+function makeChaser() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x1fa3a3, metalness: 0.5, roughness: 0.35 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 3.2, 8).rotateZ(Math.PI / 2).translate(-0.9, 0, 0), mat);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 8), new THREE.MeshStandardMaterial({ color: 0x0d5e5e, metalness: 0.3 }));
+  head.position.x = 0.75;
+  g.add(body, head);
+  const wmat = new THREE.MeshBasicMaterial({ color: 0xbff4ff, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
+  g.userData.wings = [];
+  for (const [x, side] of [[0.3, 1], [0.3, -1], [-0.2, 1], [-0.2, -1]]) {
+    const w = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 2.4).rotateX(-Math.PI / 2).translate(0, 0, side * 1.25), wmat);
+    w.position.x = x;
+    w.userData.side = side;
+    g.add(w);
+    g.userData.wings.push(w);
+  }
+  scene.add(g);
+  return g;
+}
+
+// robots: links are unit cylinders stretched between the points the sim's forward kinematics gives
+const UP = new THREE.Vector3(0, 1, 0), vA = new THREE.Vector3(), vB = new THREE.Vector3();
+function link(r, color) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 1, 12).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color, metalness: 0.4, roughness: 0.45 }));
+  scene.add(m);
+  return m;
+}
+function span(m, a, b) {
+  vA.set(...a);
+  vB.set(...b).sub(vA);
+  const len = vB.length() || 1e-3;
+  m.position.copy(vA);
+  m.quaternion.setFromUnitVectors(UP, vB.divideScalar(len));
+  m.scale.set(1, len, 1);
+}
+const ROBOT_COLORS = { picker: 0xd98e04, net: 0x3fa36b, shooter: 0xb84a3a, stacker: 0x4a7bd1 };
+const robotViews = [];
+function makeRobotView(R) {
+  const col = ROBOT_COLORS[R.kind];
+  const v = { kind: R.kind, parts: [] };
+  const add = (m) => (v.parts.push(m), m);
+  v.base = add(new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2, 0.6, 20), new THREE.MeshStandardMaterial({ color: 0x2a323c })));
+  scene.add(v.base);
+  if (R.kind === "shooter") {
+    v.post = add(link(0.6, 0x39424d));
+    v.barrel = add(link(0.32, col));
+    v.turret = add(new THREE.Mesh(new THREE.SphereGeometry(0.9, 14, 10), new THREE.MeshStandardMaterial({ color: col, metalness: 0.4 })));
+    scene.add(v.turret);
+    return v;
+  }
+  v.links = [add(link(0.5, 0x39424d)), add(link(0.42, col)), add(link(0.34, col)), add(link(0.18, 0x39424d))];
+  v.joints = [1, 2, 3].map(() => {
+    const j = add(new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 8), new THREE.MeshStandardMaterial({ color: 0x20262e })));
+    scene.add(j);
+    return j;
+  });
+  if (R.kind === "net") {
+    v.hoop = add(new THREE.Mesh(new THREE.TorusGeometry(1.6, 0.08, 8, 32).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xc8d0d8, metalness: 0.6 })));
+    v.bag = add(new THREE.Mesh(new THREE.ConeGeometry(1.6, 2.2, 20, 1, true).rotateX(Math.PI).translate(0, -1.1, 0), new THREE.MeshBasicMaterial({ color: 0x9fd8b0, wireframe: true, transparent: true, opacity: 0.45 })));
+    scene.add(v.hoop, v.bag);
+  } else {
+    const fm = new THREE.MeshStandardMaterial({ color: 0xc8d0d8, metalness: 0.6 });
+    v.fingers = [0, 1].map(() => add(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.9, 0.5).translate(0, -0.45, 0), fm)));
+    scene.add(...v.fingers);
+  }
+  return v;
+}
+const ballMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.25, 10, 8), new THREE.MeshStandardMaterial({ color: 0xffb347, emissive: 0x552200 }), 96);
+const blockMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshStandardMaterial({ roughness: 0.6 }), 16);
+for (const m of [ballMesh, blockMesh]) {
+  m.frustumCulled = false;
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(m);
+}
+const stackPad = new THREE.Mesh(new THREE.RingGeometry(0.8, 1.05, 4).rotateX(-Math.PI / 2).rotateY(Math.PI / 4), new THREE.MeshBasicMaterial({ color: 0x4a7bd1, side: THREE.DoubleSide }));
+stackPad.position.y = 0.03;
+scene.add(stackPad);
+const C_BLOCK = { floor: new THREE.Color(0x8a6a44), held: new THREE.Color(0xd8b37a), stack: new THREE.Color(0xf2c14e), falling: new THREE.Color(0xc0503a) };
+
 // ------------------------------------------------------------------ colours
 const C_HAWK = new THREE.Color(0xff6b4a), C_DOVE = new THREE.Color(0x63d4ff);
 const C_NOISE = new THREE.Color(0x6b7785);
+const C_WOUND = new THREE.Color(0x4a0a0a), C_HIT = new THREE.Color(0xffffff);
 const tmpC = new THREE.Color();
+// every colouring shows health too: wounds darken a fly toward dried blood, and a
+// fresh hit flashes white
 function flyColor(i, out) {
+  baseColor(i, out);
+  if (settings.color !== "health") out.lerp(C_WOUND, 0.75 * (1 - sim.hp[i]));
+  if (sim.hurt[i] < 0.25) out.lerp(C_HIT, 0.8 * (1 - sim.hurt[i] / 0.25));
+  return out;
+}
+function baseColor(i, out) {
   switch (settings.color) {
+    case "health": {
+      const hp = Math.max(0, Math.min(1, sim.hp[i]));
+      return out.setHSL(0.33 * hp, 0.85, 0.32 + 0.22 * hp); // green → yellow → red
+    }
     case "swarm":
       return sim.swarm[i] < 0 ? out.copy(C_NOISE) : out.set(swarmColor(sim.swarm[i]));
     case "mode":
@@ -427,6 +540,102 @@ function updateScene() {
     pathLine.visible = false;
   }
 
+  // corpses
+  let nc = 0;
+  for (const c of sim.corpses) {
+    if (nc >= 160) break;
+    const fade = Math.min(1, (CORPSE_LIFE - c.age) / 1); // shrink away in the last second
+    dummy.position.set(c.x, c.y + 0.12, c.z);
+    dummy.rotation.set(Math.PI, -c.h, c.held ? 0.5 : 0.2); // legs up
+    dummy.scale.setScalar(FLY_SCALE * Math.max(0.05, c.held ? 1 : fade));
+    dummy.updateMatrix();
+    corpseMesh.setMatrixAt(nc, dummy.matrix);
+    corpseMesh.setColorAt(nc++, tmpC.set(CAUSE_COLORS[c.cause] ?? 0x333333));
+  }
+  corpseMesh.count = nc;
+  let ns = 0;
+  for (const c of sim.corpses) {
+    if (ns >= 160 || c.held || c.y > 0.05 || !VIOLENT.has(c.cause)) continue;
+    dummy.position.set(c.x, 0.025, c.z);
+    dummy.rotation.set(0, c.h, 0);
+    dummy.scale.set(1.3 * Math.min(1, c.age * 3), 1, Math.min(1, c.age * 3) * Math.max(0.05, Math.min(1, CORPSE_LIFE - c.age)));
+    dummy.updateMatrix();
+    splatMesh.setMatrixAt(ns++, dummy.matrix);
+  }
+  splatMesh.count = ns;
+  splatMesh.instanceMatrix.needsUpdate = true;
+  corpseMesh.instanceMatrix.needsUpdate = true;
+  if (corpseMesh.instanceColor) corpseMesh.instanceColor.needsUpdate = true;
+
+  // dragonflies
+  while (chaserMeshes.length < sim.chasers.length) chaserMeshes.push(makeChaser());
+  chaserMeshes.forEach((g, k) => {
+    const c = sim.chasers[k];
+    g.visible = !!c;
+    if (!c) return;
+    g.position.set(c.x, c.y, c.z);
+    g.rotation.set(0, -Math.atan2(c.vz, c.vx), Math.atan2(c.vy, Math.hypot(c.vx, c.vz) + 1e-3) * 0.5);
+    const t = performance.now() / 22 + k;
+    for (const w of g.userData.wings) w.rotation.x = w.userData.side * Math.sin(t + (w.position.x > 0 ? 0 : 1.2)) * 0.6;
+  });
+
+  // robots
+  while (robotViews.length < sim.robots.length) robotViews.push(makeRobotView(sim.robots[robotViews.length]));
+  sim.robots.forEach((R, k) => {
+    const v = robotViews[k], on = !!sim.params.robots?.[R.kind];
+    for (const m of v.parts) m.visible = on;
+    if (!on) return;
+    const P = R.pts;
+    v.base.position.set(R.x, 0.3, R.z);
+    if (R.kind === "shooter") {
+      span(v.post, P[0], P[1]);
+      span(v.barrel, P[1], P[2]);
+      v.turret.position.set(...P[1]);
+      return;
+    }
+    for (let j = 0; j < 4; j++) span(v.links[j], P[j], P[j + 1]);
+    v.joints.forEach((m, j) => m.position.set(...P[j + 1]));
+    const t = P[4];
+    if (v.hoop) {
+      v.hoop.position.set(...t);
+      v.bag.position.set(...t);
+      v.hoop.rotation.y = v.bag.rotation.y = -R.q[0];
+    } else {
+      const yaw = R.q[0] + R.q[4], open = 0.15 + 0.45 * R.grip;
+      v.fingers.forEach((m, s) => {
+        const side = s ? 1 : -1;
+        m.position.set(t[0] - Math.sin(yaw) * open * side, t[1] + 0.5, t[2] + Math.cos(yaw) * open * side);
+        m.rotation.set(0, -yaw, 0);
+      });
+    }
+  });
+  ballMesh.count = Math.min(96, sim.balls.length);
+  for (let b = 0; b < ballMesh.count; b++) {
+    const ball = sim.balls[b];
+    dummy.position.set(ball.x, ball.y, ball.z);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    ballMesh.setMatrixAt(b, dummy.matrix);
+  }
+  ballMesh.instanceMatrix.needsUpdate = true;
+  const st = sim.robots.find((R) => R.kind === "stacker");
+  const stOn = !!(st && sim.params.robots?.stacker);
+  blockMesh.visible = stackPad.visible = stOn;
+  if (stOn) {
+    stackPad.position.set(st.stackAt[0], 0.03, st.stackAt[1]);
+    st.blocks.forEach((b, k) => {
+      dummy.position.set(b.x, b.y, b.z);
+      dummy.rotation.set(0, b.state === "stack" ? 0 : k * 0.7, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      blockMesh.setMatrixAt(k, dummy.matrix);
+      blockMesh.setColorAt(k, C_BLOCK[b.state]);
+    });
+    blockMesh.instanceMatrix.needsUpdate = true;
+    if (blockMesh.instanceColor) blockMesh.instanceColor.needsUpdate = true;
+  }
+
   // predator
   const p = sim.predator;
   predator.position.set(p.x, p.y, p.z);
@@ -492,10 +701,12 @@ const panels = new Panels({ sim: () => sim, cx, analysis, refs, brain, onFollow:
 const ideas = new IdeasMap($("#ideas-svg"), $("#ideas-detail"), { sim: () => sim, cx, analysis, refs });
 
 // ------------------------------------------------------------------ shareable state (?V=2&C=5&game=pd…)
-const SLIDERS = { V: "#r-V", C: "#r-C", mut: "#r-mut", n: "#r-n", gain: "#r-gain", eps: "#r-eps", min: "#r-min" };
+const SLIDERS = { V: "#r-V", C: "#r-C", mut: "#r-mut", n: "#r-n", gain: "#r-gain", eps: "#r-eps", min: "#r-min", drag: "#r-drag" };
+const ROBOT_BOXES = { picker: "#c-picker", net: "#c-net", shooter: "#c-shooter", stacker: "#c-stacker" };
 const query = new URLSearchParams(location.search);
 for (const [k, id] of Object.entries(SLIDERS)) if (query.has(k)) $(id).value = query.get(k);
 if (query.has("pred")) $("#c-pred").checked = query.get("pred") !== "0";
+if (query.has("bots")) for (const [k, id] of Object.entries(ROBOT_BOXES)) $(id).checked = query.get("bots").split(",").includes(k);
 
 // ------------------------------------------------------------------ controls wiring
 function bindRange(id, out, fmt, apply) {
@@ -516,6 +727,12 @@ bindRange("#r-eps", "#o-eps", (v) => v.toFixed(1), (v) => (sim.params.dbEps = v)
 bindRange("#r-min", "#o-min", (v) => v.toFixed(0), (v) => (sim.params.dbMin = v));
 $("#c-pred").addEventListener("change", (e) => (sim.params.predator = e.target.checked));
 sim.params.predator = $("#c-pred").checked;
+bindRange("#r-drag", "#o-drag", (v) => v.toFixed(0), (v) => (sim.params.chasers = v));
+function applyRobots() {
+  sim.params.robots = Object.fromEntries(Object.entries(ROBOT_BOXES).map(([k, id]) => [k, $(id).checked]));
+}
+for (const id of Object.values(ROBOT_BOXES)) $(id).addEventListener("change", applyRobots);
+applyRobots();
 $("#c-social").addEventListener("change", (e) => (settings.social = e.target.checked));
 $("#c-path").addEventListener("change", (e) => (settings.path = e.target.checked));
 $("#c-paths-all").addEventListener("change", (e) => (settings.pathsAll = e.target.checked));
@@ -575,7 +792,7 @@ if (GAMES[query.get("game")]) {
   setGame(query.get("game"), true);
 }
 if (query.get("learn") === "anyone") pickLearn("anyone");
-if (["strategy", "swarm", "mode", "energy"].includes(query.get("color"))) pickColor(query.get("color"));
+if (["strategy", "health", "swarm", "mode", "energy"].includes(query.get("color"))) pickColor(query.get("color"));
 panels.legend(settings.color);
 
 // silencing experiments
@@ -609,6 +826,8 @@ function stateQuery() {
   q.set("game", sim.params.game);
   for (const [k, id] of Object.entries(SLIDERS)) q.set(k, $(id).value);
   if (!sim.params.predator) q.set("pred", "0");
+  const bots = Object.keys(ROBOT_BOXES).filter((k) => sim.params.robots[k]);
+  if (bots.length !== 4) q.set("bots", bots.join(","));
   if (sim.params.learnFrom !== "neighbours") q.set("learn", sim.params.learnFrom);
   if (settings.color !== "strategy") q.set("color", settings.color);
   const off = SILENCE.flatMap((s, k) => (s.input.checked ? [k] : []));
@@ -635,14 +854,47 @@ $("#btn-share").addEventListener("click", async () => {
   setTimeout(() => (btn.textContent = "Copy link to this setup"), 1800);
 });
 
-$("#btn-reset").addEventListener("click", () => {
-  const params = { ...sim.params };
+// ------------------------------------------------------------------ save / load
+function swapSim(next) {
   sim.brains.dispose();
-  sim = new Sim(cx, { flies: +$("#r-n").value, params, seed: (Math.random() * 1e9) | 0 });
+  sim = next;
   sim.brains.enableWorker(WORKER_URL);
-  applySilence();
   buildWorld();
   select(-1);
+}
+// put every control back in step with a restored model
+function syncControls(ui) {
+  const P = sim.params;
+  const vals = { V: P.V, C: P.C, mut: P.mutation, n: sim.n, gain: P.gain, eps: P.dbEps, min: P.dbMin, drag: P.chasers };
+  for (const [k, id] of Object.entries(SLIDERS)) {
+    $(id).value = vals[k];
+    $(id).dispatchEvent(new Event("input"));
+  }
+  $("#c-pred").checked = P.predator;
+  for (const [k, id] of Object.entries(ROBOT_BOXES)) $(id).checked = !!P.robots?.[k];
+  applyRobots();
+  document.querySelectorAll("#seg-game button").forEach((x) => x.classList.toggle("on", x.dataset.v === P.game));
+  $("#lbl-V").textContent = GAMES[P.game].vLabel; // not setGame(): that would wipe the restored history
+  $("#lbl-C").textContent = GAMES[P.game].cLabel;
+  panels.legend(settings.color);
+  pickLearn(P.learnFrom);
+  SILENCE.forEach((x, k) => (x.input.checked = (ui.silence || []).includes(k)));
+  applySilence();
+  if (ui.color) pickColor(ui.color);
+}
+new ModelStore({
+  getSim: () => sim,
+  getUi: () => ({ color: settings.color, silence: SILENCE.flatMap((s, k) => (s.input.checked ? [k] : [])) }),
+  onLoad: (snap) => {
+    swapSim(restore(cx, snap));
+    syncControls(snap.ui || {});
+  },
+});
+
+$("#btn-reset").addEventListener("click", () => {
+  const params = { ...sim.params };
+  swapSim(new Sim(cx, { flies: +$("#r-n").value, params, seed: (Math.random() * 1e9) | 0 }));
+  applySilence();
 });
 
 // ------------------------------------------------------------------ resize & loop
