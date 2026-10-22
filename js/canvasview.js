@@ -3,6 +3,7 @@
 // orbit controls and fly picking keep working unchanged.
 import * as THREE from "three";
 import { ARENA } from "./sim.js";
+import { NET, JAR, netIndex } from "./robots.js";
 
 const STONE = "#3a4652", STONE_TOP = "#4b5a68";
 
@@ -237,13 +238,25 @@ export class CanvasRenderer {
       if (!sim.params.robots?.[R.kind]) continue;
       for (let j = 0; j + 1 < R.pts.length; j++) this.line(R.pts[j], R.pts[j + 1], ROBOT[R.kind], Math.max(2, 4 - j * 0.6));
       const t = R.pts.at(-1);
-      if (R.kind === "net") this.polygon(this.circle(t[0], t[1], t[2], 1.6, 16), "rgba(159,216,176,0.2)", "#c8d0d8");
+      if (R.kind === "net") {
+        const P = R.cloth, { M, D } = NET, at = (k, j) => {
+          const o = netIndex(k, j) * 3;
+          return [P[o], P[o + 1], P[o + 2]];
+        };
+        for (let k = 0; k <= D; k++)
+          for (let j = 0; j < M; j++) {
+            this.line(at(k, j), at(k, j + 1), k ? "rgba(191,232,200,0.6)" : "#c8d0d8", k ? 1 : 2);
+            this.line(at(k, j), k < D ? at(k + 1, j) : at(D + 1, 0), "rgba(191,232,200,0.6)");
+          }
+        this.polygon(this.circle(R.jar[0], 0.02, R.jar[1], JAR.r, 20), "rgba(168,216,255,0.15)", "#a8d8ff");
+        this.polygon(this.circle(R.jar[0], JAR.h, R.jar[1], JAR.r, 20), null, "rgba(168,216,255,0.5)");
+      }
       if (R.kind === "stacker")
         for (const b of R.blocks) {
           const p = this.project(b.x, b.y, b.z);
           if (!p) continue;
           const h = 0.48 * p[2];
-          ctx.fillStyle = b.state === "stack" ? "#f2c14e" : b.state === "falling" ? "#c0503a" : "#8a6a44";
+          ctx.fillStyle = b.held ? "#d8b37a" : b.awake ? "#c0503a" : Math.abs(b.x - R.stackAt[0]) < 0.6 && Math.abs(b.z - R.stackAt[1]) < 0.6 ? "#f2c14e" : "#8a6a44";
           ctx.fillRect(p[0] - h, p[1] - h, 2 * h, 2 * h);
         }
     }

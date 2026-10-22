@@ -13,7 +13,7 @@ import { NavGrid, takeTheBest, shouldLeave } from "./heuristics.js";
 import { SpatialHash, dbscan, kmeans } from "./cluster.js";
 import { GAMES, payoffs, replicatorStep, attractor, equilibria, GameStats } from "./game.js";
 import { UnionFind, avgClustering } from "./graph.js";
-import { makeRobots, updateRobots, robotLooms } from "./robots.js";
+import { makeRobots, updateRobots, robotLooms, collectBody } from "./robots.js";
 
 export const ARENA = 120;
 export const CORPSE_LIFE = 6; // seconds a dead fly's body stays on the floor
@@ -93,6 +93,7 @@ export class Sim {
     const F32 = () => new Float32Array(c);
     Object.assign(this, {
       x: F32(), z: F32(), y: F32(), h: F32(), speed: F32(), vy: F32(), energy: F32(), age: F32(), life: F32(),
+      kvx: F32(), kvz: F32(), held: new Int8Array(c), // knock-back velocity; 1 = trapped in the net, 2 = in the killing jar
       hp: F32(), hurt: F32(), // body integrity 0..1 (wounds from fights, predators and robots) and time since the last hit
       cause: new Array(c).fill(null), killer: new Array(c).fill(null), // why a fly died this tick, and the robot that collects it
       hawkGene: F32(), gainGene: F32(), intake: F32(), wing: F32(), escape: F32(), cooldown: F32(), decide: F32(),
@@ -180,6 +181,8 @@ export class Sim {
     this.energy[i] = 4;
     this.hp[i] = 1;
     this.hurt[i] = 9;
+    this.kvx[i] = this.kvz[i] = 0;
+    this.held[i] = 0;
     this.cause[i] = null;
     this.killer[i] = null;
     this.age[i] = 0;
@@ -389,11 +392,13 @@ export class Sim {
         if (wrap(Math.atan2(dz, dx) - h) > 0) loomR = Math.max(loomR, size);
         else loomL = Math.max(loomL, size);
       }
-      // and so do robot tools coming down
+      // and so do robot tools, but LPLC2 responds to expansion, not size: a tool
+      // creeping closer goes unnoticed, one rushing in triggers the escape
       for (const t of looms) {
-        const dx = t[0] - x, dz = t[2] - z, d = Math.hypot(dx, t[1] - this.y[i], dz);
+        const dx = t[0] - x, dy = t[1] - this.y[i], dz = t[2] - z, d = Math.hypot(dx, dy, dz);
         if (d > 6) continue;
-        const size = clamp01(1.5 / d) * 0.8;
+        const approach = -(t[3] * dx + t[4] * dy + t[5] * dz) / (d || 1);
+        const size = clamp01(1.5 / d) * clamp01(approach / 4);
         if (wrap(Math.atan2(dz, dx) - h) > 0) loomR = Math.max(loomR, size);
         else loomL = Math.max(loomL, size);
       }
@@ -510,11 +515,20 @@ export class Sim {
         if (Math.hypot(tp.x - x, tp.z - z) < tp.r * 0.9) goalY = 0;
       }
       if (this.escape[i] > 0) goalY = 8;
-      this.vy[i] += ((goalY - this.y[i]) * 2.5 - this.vy[i] * 1.5) * DT;
-      this.y[i] = Math.max(0, this.y[i] + this.vy[i] * DT);
+      // wounded flies cannot hold altitude as well
+      this.vy[i] += ((goalY - this.y[i]) * 2.5 * (0.5 + 0.5 * this.hp[i]) - this.vy[i] * 1.5) * DT;
+      // a fly in the net is placed by the net, not by its own flight
+      if (this.held[i] !== 1) this.y[i] = Math.max(0, this.y[i] + this.vy[i] * DT);
+      if (this.y[i] === 0 && this.vy[i] < 0) this.vy[i] = 0;
 
-      x += Math.cos(this.h[i]) * this.speed[i] * DT;
-      z += Math.sin(this.h[i]) * this.speed[i] * DT;
+      // own thrust along the heading plus any knock-back, which air drag bleeds off
+      if (this.held[i] !== 1) {
+        x += (Math.cos(this.h[i]) * this.speed[i] + this.kvx[i]) * DT;
+        z += (Math.sin(this.h[i]) * this.speed[i] + this.kvz[i]) * DT;
+      }
+      const drag = Math.exp(-3 * DT);
+      this.kvx[i] *= drag;
+      this.kvz[i] *= drag;
       // keep out of obstacles and inside the arena
       for (const o of this.obstacles) {
         const d = Math.hypot(x - o.x, z - o.z);
@@ -567,12 +581,12 @@ export class Sim {
     const { io } = this.cx;
     const nb = [];
     for (let i = 0; i < this.n; i++) {
-      if (this.cooldown[i] > 0 || this.y[i] > 0.6) continue;
+      if (this.cooldown[i] > 0 || this.y[i] > 0.6 || this.held[i]) continue;
       const pk = this.patchAt(this.x[i], this.z[i]);
       if (pk < 0 || this.patches[pk].bitter || this.patches[pk].sugar < 0.05) continue;
       this.hash.query(this.x[i], this.z[i], 1.5, this.x, this.z, nb);
       let j = -1;
-      for (const q of nb) if (q !== i && this.cooldown[q] <= 0 && this.y[q] < 0.6) { j = q; break; }
+      for (const q of nb) if (q !== i && this.cooldown[q] <= 0 && this.y[q] < 0.6 && !this.held[q]) { j = q; break; }
       if (j < 0) continue;
       // each fly's strategy = heritable disposition + octopaminergic arousal of its own connectome
       const pi = this.choiceProb(i);
@@ -649,17 +663,15 @@ export class Sim {
       // the beak catches what it touches; the wings and the pressure wave of the
       // dive batter flies further out, at most once per pass
       for (let i = 0; i < this.n; i++) {
-        if (this.hp[i] <= 0) continue;
+        if (this.hp[i] <= 0 || this.held[i]) continue;
         const d = Math.hypot(this.x[i] - p.x, this.y[i] - p.y, this.z[i] - p.z);
         if (d < 1.4) {
           this.wound(i, 1, "eaten");
         } else if (d < 3.5 && this.hurt[i] > 1) {
           this.wound(i, 0.25 + 0.45 * (1 - d / 3.5), "eaten");
-          // knocked tumbling away from the strike
-          const a = Math.atan2(this.z[i] - p.z, this.x[i] - p.x);
-          this.x[i] += Math.cos(a) * 0.6;
-          this.z[i] += Math.sin(a) * 0.6;
-          this.vy[i] -= 3;
+          // the wing beat and wake of the dive send the fly tumbling away and down
+          const a = Math.atan2(this.z[i] - p.z, this.x[i] - p.x), s = 12 * (1 - d / 3.5);
+          this.push(i, Math.cos(a) * s + p.vx * 0.5, -3, Math.sin(a) * s + p.vz * 0.5);
         }
         if (this.hp[i] <= 0) p.kills++;
       }
@@ -689,7 +701,7 @@ export class Sim {
         let best = -1, bs = Infinity;
         for (let i = 0; i < this.n; i++) {
           const d = Math.hypot(this.x[i] - c.x, this.z[i] - c.z);
-          const score = d * (0.35 + 0.65 * this.hp[i]) * (1 + 0.15 * Math.min(6, this.degree[i]));
+          const score = this.held[i] ? Infinity : d * (0.35 + 0.65 * this.hp[i]) * (1 + 0.15 * Math.min(6, this.degree[i]));
           if (score < bs) (bs = score), (best = i);
         }
         c.target = best;
@@ -708,7 +720,7 @@ export class Sim {
         az = (dz / d) * 40;
         if (Math.hypot(this.x[i] - c.x, this.y[i] - c.y, this.z[i] - c.z) < 1.1) {
           c.bite = 1.2; // handling time, then the chase resumes
-          this.vy[i] -= 2;
+          this.push(i, c.vx * 0.3, -2, c.vz * 0.3);
           if (this.wound(i, 0.4, "bitten")) {
             c.kills++;
             c.target = -1;
@@ -728,6 +740,14 @@ export class Sim {
       c.y = Math.max(0.3, c.y + c.vy * DT);
       c.z = Math.max(-ARENA / 2, Math.min(ARENA / 2, c.z + c.vz * DT));
     }
+  }
+
+  // an impulse (as a velocity change) from a collision or a blast
+  push(i, dvx, dvy, dvz) {
+    if (this.held[i] === 1) return;
+    this.kvx[i] += dvx;
+    this.vy[i] += dvy;
+    this.kvz[i] += dvz;
   }
 
   // damage a fly's body; at zero health it dies of `cause` (a key of this.deaths)
@@ -750,14 +770,15 @@ export class Sim {
       const cause = this.cause[i] ?? (this.energy[i] <= 0 ? "starved" : "old");
       this.deaths[cause]++;
       // the body drops where the fly died and stays a few seconds; its slot is reused for a newborn
-      this.corpses.push({ x: this.x[i], y: this.y[i], z: this.z[i], h: this.h[i], vy: Math.min(0, this.vy[i]), age: 0, cause });
+      // it keeps the momentum it died with
+      const c = {
+        x: this.x[i], y: this.y[i], z: this.z[i], h: this.h[i], age: 0, cause,
+        vx: this.held[i] ? 0 : Math.cos(this.h[i]) * this.speed[i] + this.kvx[i], vy: this.vy[i],
+        vz: this.held[i] ? 0 : Math.sin(this.h[i]) * this.speed[i] + this.kvz[i],
+      };
+      this.corpses.push(c);
       if (this.corpses.length > 150) this.corpses.shift();
-      const by = this.killer[i];
-      if (by && (by.kind === "picker" || by.kind === "net")) {
-        const c = this.corpses.at(-1), r = by.kind === "net" ? 0.9 : 0.2;
-        Object.assign(c, { held: true, ox: (this.rng() - 0.5) * r, oy: -this.rng() * r, oz: (this.rng() - 0.5) * r });
-        by.held.push(c);
-      }
+      if (this.killer[i]) collectBody(this, this.killer[i], c, i);
       const parent = this.pickParent();
       if (parent !== i && this.energy[parent] > 2) this.energy[parent] -= 1; // reproduction costs energy
       this.spawn(i, parent === i ? null : parent);
@@ -767,11 +788,28 @@ export class Sim {
   }
 
   updateCorpses() {
+    // a dead fly is a small ballistic body: gravity, air drag, a dead bounce, sliding friction
+    const drag = Math.exp(-1.2 * DT);
     for (const c of this.corpses) {
       c.age += DT;
       if (c.held) continue;
-      c.vy -= 20 * DT;
-      c.y = Math.max(0, c.y + c.vy * DT);
+      c.vy = (c.vy - 20 * DT) * drag;
+      c.vx = (c.vx || 0) * drag;
+      c.vz = (c.vz || 0) * drag;
+      c.x += c.vx * DT;
+      c.y += c.vy * DT;
+      c.z += c.vz * DT;
+      if (c.y <= 0) {
+        c.y = 0;
+        c.vy = c.vy < -3 ? -c.vy * 0.2 : 0;
+        const f = Math.max(0, 1 - (0.5 * 20 * DT) / (Math.hypot(c.vx, c.vz) || 1));
+        c.vx *= f;
+        c.vz *= f;
+      }
+      for (const o of this.obstacles) {
+        const dx = c.x - o.x, dz = c.z - o.z, d = Math.hypot(dx, dz);
+        if (d < o.r + 0.2 && c.y < 7) (c.x = o.x + (dx / d) * (o.r + 0.2)), (c.z = o.z + (dz / d) * (o.r + 0.2)), (c.vx *= -0.3), (c.vz *= -0.3);
+      }
     }
     while (this.corpses.length && this.corpses[0].age > CORPSE_LIFE && !this.corpses[0].held) this.corpses.shift();
   }

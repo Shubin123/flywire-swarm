@@ -4,6 +4,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { loadData, Connectome } from "./connectome.js";
 import { Sim, ARENA, CORPSE_LIFE } from "./sim.js";
+import { NET, JAR, netIndex } from "./robots.js";
 import { analyseConnectome } from "./analysis.js";
 import { BrainView } from "./brainview.js";
 import { Brain2D } from "./brain2d.js";
@@ -362,9 +363,25 @@ function makeRobotView(R) {
     return j;
   });
   if (R.kind === "net") {
-    v.hoop = add(new THREE.Mesh(new THREE.TorusGeometry(1.6, 0.08, 8, 32).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xc8d0d8, metalness: 0.6 })));
-    v.bag = add(new THREE.Mesh(new THREE.ConeGeometry(1.6, 2.2, 20, 1, true).rotateX(Math.PI).translate(0, -1.1, 0), new THREE.MeshBasicMaterial({ color: 0x9fd8b0, wireframe: true, transparent: true, opacity: 0.45 })));
-    scene.add(v.hoop, v.bag);
+    // hoop: a torus in the xz plane, turned to face the mouth direction each frame
+    v.hoop = add(new THREE.Mesh(new THREE.TorusGeometry(NET.R, 0.08, 8, 32).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xc8d0d8, metalness: 0.6 })));
+    // bag: the cloth's springs drawn as lines straight from the particle positions
+    const links = [];
+    for (let k = 0; k <= NET.D; k++)
+      for (let j = 0; j < NET.M; j++) {
+        links.push(netIndex(k, j), netIndex(k, j + 1));
+        links.push(netIndex(k, j), k < NET.D ? netIndex(k + 1, j) : netIndex(NET.D + 1, 0));
+      }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(R.cloth.length), 3).setUsage(THREE.DynamicDrawUsage));
+    g.setIndex(links);
+    v.bag = add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xbfe8c8, transparent: true, opacity: 0.7 })));
+    v.bag.frustumCulled = false;
+    // killing jar: a glass cylinder with a hinged lid
+    v.jar = add(new THREE.Mesh(new THREE.CylinderGeometry(JAR.r, JAR.r, JAR.h, 24, 1, true), new THREE.MeshStandardMaterial({ color: 0xa8d8ff, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false, roughness: 0.1 })));
+    v.jarBase = add(new THREE.Mesh(new THREE.CircleGeometry(JAR.r, 24).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x24303a })));
+    v.lid = add(new THREE.Mesh(new THREE.CylinderGeometry(JAR.r + 0.1, JAR.r + 0.1, 0.15, 24).translate(JAR.r, 0, 0), new THREE.MeshStandardMaterial({ color: 0x8a94a0, metalness: 0.5 })));
+    scene.add(v.hoop, v.bag, v.jar, v.jarBase, v.lid);
   } else {
     const fm = new THREE.MeshStandardMaterial({ color: 0xc8d0d8, metalness: 0.6 });
     v.fingers = [0, 1].map(() => add(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.9, 0.5).translate(0, -0.45, 0), fm)));
@@ -597,9 +614,15 @@ function updateScene() {
     v.joints.forEach((m, j) => m.position.set(...P[j + 1]));
     const t = P[4];
     if (v.hoop) {
-      v.hoop.position.set(...t);
-      v.bag.position.set(...t);
-      v.hoop.rotation.y = v.bag.rotation.y = -R.q[0];
+      v.hoop.position.set(...R.hoop);
+      v.hoop.quaternion.setFromUnitVectors(UP, vA.set(...R.n));
+      const pos = v.bag.geometry.attributes.position;
+      pos.array.set(R.cloth);
+      pos.needsUpdate = true;
+      v.jar.position.set(R.jar[0], JAR.h / 2, R.jar[1]);
+      v.jarBase.position.set(R.jar[0], 0.02, R.jar[1]);
+      v.lid.position.set(R.jar[0] - JAR.r, JAR.h, R.jar[1]);
+      v.lid.rotation.z = (1 - R.lid) * 1.9; // swings open on its hinge
     } else {
       const yaw = R.q[0] + R.q[4], open = 0.15 + 0.45 * R.grip;
       v.fingers.forEach((m, s) => {
@@ -626,11 +649,11 @@ function updateScene() {
     stackPad.position.set(st.stackAt[0], 0.03, st.stackAt[1]);
     st.blocks.forEach((b, k) => {
       dummy.position.set(b.x, b.y, b.z);
-      dummy.rotation.set(0, b.state === "stack" ? 0 : k * 0.7, 0);
+      dummy.rotation.set(b.rx, b.yaw, b.rz);
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
       blockMesh.setMatrixAt(k, dummy.matrix);
-      blockMesh.setColorAt(k, C_BLOCK[b.state]);
+      blockMesh.setColorAt(k, C_BLOCK[b.held ? "held" : b.awake ? "falling" : Math.abs(b.x - st.stackAt[0]) < 0.6 && Math.abs(b.z - st.stackAt[1]) < 0.6 ? "stack" : "floor"]);
     });
     blockMesh.instanceMatrix.needsUpdate = true;
     if (blockMesh.instanceColor) blockMesh.instanceColor.needsUpdate = true;

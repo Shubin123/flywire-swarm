@@ -50,15 +50,24 @@ contest rarely kills (otherwise losers die before anyone can learn from their ba
 
 Every fly has a health value (0–1) next to its energy. Escalated Hawk–Hawk fights wound both flies in proportion to C,
 the bird's dive batters flies near its path and swallows the one it touches, and dragonflies run down single flies
-(preferring wounded, isolated ones) and bite. Robots, re-implemented after the 6-DOF arm in
-[ArmLab / 6dof-gym-web](https://shubin123.github.io/6dof-gym-web/) (analytic IK targets, a per-tick joint-step cap,
-no going below the floor), share the arena: a **picker** arm grips flies off the food and crushes them, a **net** arm
-sweeps through the densest knot, a **ball turret** lobs balls at flies near the stacker, and a **stacker** arm tries to
-stack 16 blocks while flies knock blocks out of its gripper and stray balls topple its tower. Wounded flies are slower
-and heal slowly. At zero health a fly dies: its body falls, lies (legs up, over a splat) for six seconds, and its slot
-goes to a newborn. Colour by **Health** for green → yellow → red. In every other colouring, wounds darken a fly and a hit
-flashes white. In 300 s runs over three seeds, the robots and dragonflies did not shift the Hawk share away from the ESS
-(0.46 with them, 0.44 without).
+(preferring wounded, isolated ones) and bite. Hits transfer momentum: flies are knocked back and air drag slows them.
+
+Robots, re-implemented after the 6-DOF arm in [ArmLab / 6dof-gym-web](https://shubin123.github.io/6dof-gym-web/), share
+the arena. Their joints have inertia, PID servos with gravity feed-forward, torque and speed limits, and sag under load.
+Like ArmLab's safety layer, they reject any step that would put a link under the floor.
+- The **picker** creeps up slowly enough not to trip the fly's looming detectors (LPLC2 responds to approach speed),
+  then snaps shut.
+- The **net** is a mass-spring cloth bag (position-based dynamics) on a hoop. It sweeps mouth-first through the densest
+  knot of flies. Flies that pass the mouth are trapped: they struggle, the cloth bulges, and they crawl for the mouth
+  until a twist of the hoop closes it. The arm then carries them to a killing jar and shakes them in.
+- The **ball turret** leads its target and lobs balls with drag, bouncing and momentum transfer.
+- The **stacker** builds a 16-block tower from rigid blocks with gravity, friction and contacts. A tower whose upper
+  centre of mass leaves its support topples by itself. Flies that hit the carried block can knock it out of the gripper,
+  and stray balls knock blocks out of the tower.
+
+Wounded flies are slower and heal slowly. A dead fly is a small ballistic body: it falls with the momentum it had, lies
+legs up over a splat for six seconds, and its slot goes to a newborn. Colour by **Health** for green → yellow → red. In
+every other colouring, wounds darken a fly and a hit flashes white.
 
 ### Saving the model
 

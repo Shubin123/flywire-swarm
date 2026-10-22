@@ -25,6 +25,12 @@ function stackerLine(s) {
   return `${R.stacked}/16 · ${R.completions} · ${R.knocked} · ${R.bestTime == null ? "–" : R.bestTime.toFixed(0) + " s"}`;
 }
 
+function netLine(s) {
+  const R = s.robots.find((r) => r.kind === "net");
+  if (!R || !s.params.robots?.net) return "off";
+  return `${R.caught.length} · ${R.jarred} · ${R.escaped}`;
+}
+
 export class Panels {
   constructor({ sim, cx, analysis, refs, brain, onFollow, onDeselect }) {
     this.sim = sim;
@@ -265,6 +271,7 @@ export class Panels {
       ["killed by bird / dragonflies", `${s.deaths.eaten} / ${s.deaths.bitten}`],
       ["robot kills: picked / net / shot / swatted", `${s.deaths.picked} / ${s.deaths.netted} / ${s.deaths.shot} / ${s.deaths.swatted}`],
       ["stacker: stack · done · knocked · best", stackerLine(s)],
+      ["net: in the bag · jarred · escaped", netLine(s)],
       ["births · max generation", `${s.births} · ${Math.max(...s.generation.slice(0, s.n))}`],
     ]);
     this.chartHawk();

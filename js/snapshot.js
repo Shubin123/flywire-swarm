@@ -6,13 +6,13 @@ import { Sim, ARENA } from "./sim.js";
 import { NavGrid } from "./heuristics.js";
 import { GameStats } from "./game.js";
 
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
 
 // per-fly arrays (structure of arrays) copied straight across
 const FLY_ARRAYS = [
   "x", "z", "y", "h", "speed", "vy", "energy", "age", "life", "hp", "hurt", "hawkGene", "gainGene", "intake", "wing",
   "escape", "cooldown", "decide", "oa", "residence", "payoff", "played", "lastHawk", "target", "pathIdx", "swarm",
-  "mode", "comp", "degree", "generation", "feeding", "parent", "id",
+  "mode", "comp", "degree", "generation", "feeding", "parent", "id", "kvx", "kvz", "held",
 ];
 const PLAIN = [
   "n", "t", "tick", "births", "deaths", "nextId", "params", "obstacles", "patches", "predator", "chasers", "theoryX",
@@ -28,7 +28,7 @@ export function snapshot(sim, ui = {}) {
   s.stats = { ...sim.stats };
   s.corpses = sim.corpses.map(({ held, ox, oy, oz, ...c }) => c); // bodies being carried are dropped on load
   s.balls = sim.balls.map(({ from, ...b }) => ({ ...b, from: sim.robots.indexOf(from) }));
-  s.robots = sim.robots.map(({ held, hitSet, ...R }) => R);
+  s.robots = sim.robots.map(({ held, bodies, ...R }) => R); // carried bodies are dropped on load
   s.brains = { R: sim.brains.R, gain: sim.brains.gain };
   return s;
 }
@@ -43,7 +43,7 @@ export function restore(cx, s) {
   sim.silenced = new Set(s.silenced);
   sim.stats = Object.assign(new GameStats(), s.stats);
   sim.corpses = s.corpses;
-  sim.robots = s.robots.map((R) => ({ ...R, held: [], hitSet: R.state === "sweep" ? new Set() : null }));
+  sim.robots = s.robots.map((R) => ({ ...R, held: [], ...(R.kind === "net" ? { bodies: [] } : {}) }));
   sim.balls = s.balls.map((b) => ({ ...b, from: sim.robots[b.from] ?? sim.robots[0] }));
   sim.brains.R.set(s.brains.R);
   sim.brains.gain.set(s.brains.gain);
