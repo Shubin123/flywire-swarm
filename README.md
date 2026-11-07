@@ -85,9 +85,8 @@ egg-to-adult time).
 - Pupae eclose as pale adults whose reserves depend on how well they ate as larvae. Adults age (a new lifespan changes how
   fast every fly ages from then on), and they die of old age, hunger, fights, the bird, dragonflies or the robots.
 
-A counter over the arena shows the live number of adults, the sexes, the brood at each stage, hatch and death rates, and
-a five-minute sparkline. The **Population** tab charts the whole run, with a tick at each change you make. It also breaks
-down the brood by stage and shows the last minute's deaths by cause.
+The **Population** tab shows the live number of adults and brood and charts the whole run, with a tick at each change you
+make. It also breaks down the population by life stage and shows the last minute's deaths by cause.
 
 The left panel is split into the two sides of the experiment:
 - **Fly life cycle:** adult lifespan, eggs per clutch, egg-to-adult time, metabolic rate, food, and a button that

@@ -61,8 +61,6 @@ export class Panels {
     this.onDeselect = onDeselect;
     this.selected = -1;
     this.camMode = "overview";
-    $("#pop-hud").addEventListener("click", () => this.showTab("pop"));
-    $("#pop-hud").addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), this.showTab("pop")));
 
     document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => this.showTab(b.dataset.tab)));
     document.querySelectorAll("#seg-brain button").forEach((b) =>
@@ -161,47 +159,7 @@ export class Panels {
     $("#fpv-label").innerHTML = `Fly #${s.id[i]} ${s.sex[i] ? "♂" : "♀"} · ${doing} · energy${bar(s.energy[i] / 12, "#7ddc8a")}health${bar(s.hp[i], "#ff6b6b")}age ${Math.round(s.age[i])} s · drag to look · Esc to leave`;
   }
 
-  // ------------------------------------------------------------------ population: HUD on the stage and the tab
-  hud() {
-    const s = this.sim(), c = s.census(), H = s.popHistory;
-    const el = $("#pop-hud");
-    el.classList.toggle("extinct", s.extinctAt != null);
-    $("#pop-adults").textContent = c.adults;
-    // births and deaths per second over the last ~30 s
-    const ref = H.findLast((h) => s.t - h.t >= 30) ?? H[0];
-    const dt = ref ? s.t - ref.t : 0;
-    const deaths = Object.values(s.deaths).reduce((a, b) => a + b, 0);
-    const bRate = dt > 2 ? (s.births - ref.births) / dt : 0, dRate = dt > 2 ? (deaths - ref.deaths) / dt : 0;
-    const trend = dt > 2 ? (c.adults - ref.adults) : 0;
-    const tr = $("#pop-trend");
-    tr.textContent = s.extinctAt != null ? "extinct" : dt > 2 ? `${trend > 0 ? "▲" : trend < 0 ? "▼" : "■"} ${trend > 0 ? "+" : ""}${trend} / ${Math.round(dt)} s` : "";
-    tr.className = `pop-trend ${s.extinctAt != null || trend < -2 ? "down" : trend > 2 ? "up" : ""}`;
-    $("#pop-sub").textContent = `♀ ${c.females} ♂ ${c.males} · ${c.eggs} eggs · ${c.larvae} larvae · ${c.pupae} pupae`;
-    $("#pop-rate").textContent = s.extinctAt != null ? `died out at ${clockFmt(s.extinctAt)} — release flies to try again` : `${fmt(bRate, 1)} hatch/s · ${fmt(dRate, 1)} die/s · peak ${s.peak}`;
-    // sparkline of the last five minutes
-    const cv = $("#pop-spark"), ctx = setupCanvas(cv), W = cv.clientWidth, Hh = cv.clientHeight;
-    ctx.clearRect(0, 0, W, Hh);
-    const pts = H.filter((h) => s.t - h.t <= 300).concat([{ t: s.t, adults: c.adults, brood: c.brood }]);
-    const max = Math.max(20, ...pts.map((h) => Math.max(h.adults, h.brood))) * 1.1;
-    const X = (t) => W - ((s.t - t) / 300) * W, Y = (v) => Hh - 2 - (v / max) * (Hh - 4);
-    const line = (key, color, dash) => {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash(dash);
-      ctx.beginPath();
-      pts.forEach((h, k) => (k ? ctx.lineTo(X(h.t), Y(h[key])) : ctx.moveTo(X(h.t), Y(h[key]))));
-      ctx.stroke();
-      ctx.setLineDash([]);
-    };
-    line("brood", "rgba(234,223,191,0.55)", [3, 3]);
-    line("adults", css("--accent"), []);
-    for (const m of s.marks) {
-      if (s.t - m.t > 300) continue;
-      ctx.fillStyle = "rgba(255,255,255,0.5)";
-      ctx.fillRect(Math.round(X(m.t)), 0, 1, Hh);
-    }
-  }
-
+  // ------------------------------------------------------------------ population tab
   updatePopulation(c) {
     const s = this.sim(), H = s.popHistory;
     const deaths = Object.values(s.deaths).reduce((a, b) => a + b, 0);

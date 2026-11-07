@@ -1225,7 +1225,6 @@ function frame(now) {
   if (uiTimer > 0.25) {
     uiTimer = 0;
     panels.update(selected);
-    panels.hud();
     if (camMode === "fpv") panels.fpvLabel(selected);
     ideas.update();
     syncUrl();
