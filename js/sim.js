@@ -9,14 +9,37 @@
 //   clustering  (DBSCAN swarms, k-means behavioural modes from neural activity)
 
 import { BrainPool } from "./connectome.js";
-import { NavGrid, takeTheBest, shouldLeave } from "./heuristics.js";
+import { NavGrid, takeTheBest, shouldLeave, NURSERY_CUES } from "./heuristics.js";
 import { SpatialHash, dbscan, kmeans } from "./cluster.js";
 import { GAMES, payoffs, replicatorStep, attractor, equilibria, GameStats } from "./game.js";
 import { UnionFind, avgClustering } from "./graph.js";
-import { makeRobots, updateRobots, robotLooms, collectBody } from "./robots.js";
+import { makeRobots, updateRobots, robotLooms, collectBody, remapFlies } from "./robots.js";
 
 export const ARENA = 120;
 export const CORPSE_LIFE = 6; // seconds a dead fly's body stays on the floor
+
+// Life cycle (Drosophila at 25 °C, compressed): egg → feeding larva → pupa → adult.
+// Development is split 20 % egg, 50 % larva, 30 % pupa of params.develop seconds.
+export const EGG_END = 0.2, LARVA_END = 0.7;
+export const broodStage = (b, develop) => (b.age < EGG_END * develop ? 0 : b.age < LARVA_END * develop ? 1 : 2);
+export const MATURE_AGE = 6; // seconds after eclosion before an adult mates or lays
+export const BROOD_CAP = 1200;
+const EGG_COST = 1; // energy a female puts into each egg
+const LAY_RESERVE = 4; // energy she keeps for herself after laying a clutch
+const LAY_GAP = 12; // seconds between clutches
+const LARVA_FOOD = 0.01; // patch sugar a larva eats over its whole feeding stage
+const LARVA_ROOM = 0.09; // larvae a patch can feed at the full rate, per unit radius² (× params.food)
+const larvaRoom = (p, food) => LARVA_ROOM * food * p.r * p.r;
+const NURSERY_CROWD = 6; // females will not lay where eggs and larvae already number this many times the room
+const PUPATE_FED = 0.4; // larvae that ate less than this share of a full meal die at pupation
+
+// per-fly arrays moved together when a dead fly's slot is filled by another
+const FLY_FIELDS = [
+  "x", "z", "y", "h", "speed", "vy", "energy", "age", "life", "kvx", "kvz", "held", "hp", "hurt", "cause", "killer",
+  "hawkGene", "gainGene", "intake", "wing", "escape", "cooldown", "decide", "oa", "residence", "payoff", "played",
+  "lastHawk", "target", "reason", "path", "pathIdx", "swarm", "mode", "comp", "degree", "generation", "feeding",
+  "parent", "id", "sex", "mated", "mateHawk", "mateGain", "layTimer", "eggsLaid", "wear",
+];
 const DT = 1 / 30;
 const TAU = Math.PI * 2;
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -53,6 +76,13 @@ export class Sim {
       predator: true,
       chasers: 2, // dragonflies that run down single flies, preferring the wounded
       robots: { picker: true, net: true, shooter: true, stacker: true }, // see robots.js
+      birdEvery: 14, // mean seconds between the bird's dives
+      larvicide: 0, // share of the brood (eggs, larvae, pupae) killed before it can hatch
+      lifespan: 120, // mean adult lifespan in seconds (each fly gets 75–125 % of it)
+      clutch: 3, // eggs per clutch
+      develop: 24, // seconds from egg to adult
+      metabolism: 1, // multiplies the energy every adult burns
+      food: 1, // multiplies how much food the patches give larvae, and how fast they regrow
       gain: 9,
       aspiration: 0.12, // satisficing intake threshold
       socialRadius: 3.5,
@@ -65,10 +95,13 @@ export class Sim {
     this.rng = mulberry32(opts.seed ?? 20241002);
     this.t = 0;
     this.tick = 0;
-    this.births = 0;
+    this.births = 0; // adults that eclosed
+    this.laid = 0; // eggs laid
     this.deaths = { starved: 0, old: 0, fights: 0, eaten: 0, bitten: 0, picked: 0, netted: 0, shot: 0, swatted: 0 };
+    this.broodDeaths = { starved: 0, poisoned: 0, crowded: 0 };
 
     this.brains = new BrainPool(cx, this.cap);
+    this.brains.owner = this; // lets late worker results find their fly after slots move
     this.calibrate();
 
     // world layout
@@ -101,10 +134,19 @@ export class Sim {
       path: new Array(c).fill(null), pathIdx: new Int16Array(c), swarm: new Int32Array(c).fill(-1),
       mode: new Int8Array(c), comp: new Int32Array(c), degree: new Int16Array(c), generation: new Int32Array(c),
       feeding: new Uint8Array(c), parent: new Int32Array(c).fill(-1), id: new Int32Array(c),
+      sex: new Int8Array(c), mated: new Int8Array(c), mateHawk: F32(), mateGain: F32(), layTimer: F32(), eggsLaid: new Int32Array(c), // 0 = female, 1 = male; father's genes
+      wear: F32(), // share of its life used up: it dies of old age at 1
     });
     this.nextId = 0;
-    this.corpses = []; // recently dead flies, falling and lying where they died: { x, y, z, h, vy, age, cause }
+    this.corpses = []; // recently dead flies, falling and lying where they died: { x, y, z, h, vy, age, cause, id }
+    this.brood = []; // eggs, larvae and pupae on the food: { x, z, age, fed, vigor, hawk, gain, gen, mother }
     for (let i = 0; i < this.n; i++) this.spawn(i, null);
+    // start with an age-structured population: brood already developing on the food
+    for (let k = 0; k < this.n * 0.25; k++) this.seedBrood();
+    this.peak = this.n;
+    this.extinctAt = null;
+    this.popHistory = [];
+    this.marks = []; // { t, label } when the user changes a parameter, drawn on the population chart
 
     this.hash = new SpatialHash(Math.max(this.params.socialRadius, this.params.dbEps));
     this.socialEdges = [];
@@ -116,7 +158,7 @@ export class Sim {
     this.swarms = { count: 0, noise: 0, sizes: [], hawk: [] };
     this.social = { edges: 0, components: 0, giant: 0, clustering: 0, avgDegree: 0, leaders: [] };
     this.astarStats = { astar: 0, dijkstra: 0, samples: 0 };
-    this.events = { contest: 0, astar: 0, escape: 0, birth: 0, feed: 0, imitate: 0 };
+    this.events = { contest: 0, astar: 0, escape: 0, birth: 0, feed: 0, imitate: 0, mate: 0, lay: 0 };
     this.tmp = [];
   }
 
@@ -153,40 +195,49 @@ export class Sim {
     return { x: 0, z: 0, r: 3, bitter, sugar: bitter ? 0 : 1, occupants: 0, age: 0 };
   }
 
-  spawn(i, parent) {
+  // a founder (pupa = null: random genes, anywhere, any adult age) or an adult
+  // eclosing from a pupa (well-fed larvae make adults with bigger reserves)
+  spawn(i, pupa) {
     const R = this.rng;
-    const P = this.params;
-    if (parent === null) {
+    if (pupa === null) {
       this.x[i] = (R() - 0.5) * ARENA * 0.8;
       this.z[i] = (R() - 0.5) * ARENA * 0.8;
+      this.y[i] = 1 + R() * 3;
       this.hawkGene[i] = (R() - 0.5) * 3;
       this.gainGene[i] = 1 + (R() - 0.5) * 0.3;
       this.generation[i] = 0;
       this.parent[i] = -1;
-      this.brains.reset(i);
+      this.energy[i] = 4;
+      this.wear[i] = R() * 0.5;
     } else {
-      this.x[i] = this.x[parent] + (R() - 0.5) * 3;
-      this.z[i] = this.z[parent] + (R() - 0.5) * 3;
-      this.hawkGene[i] = this.hawkGene[parent] + gauss(R) * P.mutation * 0.6;
-      this.gainGene[i] = Math.min(1.4, Math.max(0.7, this.gainGene[parent] + gauss(R) * P.mutation * 0.1));
-      this.generation[i] = this.generation[parent] + 1;
-      this.parent[i] = this.id[parent];
-      this.brains.copy(parent, i);
+      this.x[i] = pupa.x;
+      this.z[i] = pupa.z;
+      this.y[i] = 0;
+      this.hawkGene[i] = pupa.hawk;
+      this.gainGene[i] = pupa.gain;
+      this.generation[i] = pupa.gen;
+      this.parent[i] = pupa.mother;
+      this.energy[i] = 2 + 4 * pupa.fed;
+      this.wear[i] = 0;
     }
+    this.brains.reset(i);
     this.id[i] = this.nextId++;
-    this.y[i] = 1 + R() * 3;
+    this.sex[i] = R() < 0.5 ? 0 : 1;
+    this.mated[i] = 0;
+    this.mateHawk[i] = this.mateGain[i] = 0;
+    this.layTimer[i] = 0;
+    this.eggsLaid[i] = 0;
     this.h[i] = R() * TAU;
     this.speed[i] = 3;
     this.vy[i] = 0;
-    this.energy[i] = 4;
     this.hp[i] = 1;
     this.hurt[i] = 9;
     this.kvx[i] = this.kvz[i] = 0;
     this.held[i] = 0;
     this.cause[i] = null;
     this.killer[i] = null;
-    this.age[i] = 0;
-    this.life[i] = 70 + R() * 70;
+    this.life[i] = 0.75 + R() * 0.5; // personal share of params.lifespan
+    this.age[i] = this.wear[i] * this.life[i] * this.params.lifespan;
     this.intake[i] = 0.3;
     this.residence[i] = 0;
     this.payoff[i] = 0;
@@ -218,24 +269,78 @@ export class Sim {
     return this.n ? s / this.n : 0;
   }
 
-  setFlyCount(n) {
-    n = Math.max(10, Math.min(this.cap, n | 0));
-    for (let i = this.n; i < n; i++) this.spawn(i, this.pickParent());
-    this.n = n;
+  // release k wild flies (random genes and ages) into the arena; returns how many fitted
+  release(k) {
+    const add = Math.max(0, Math.min(k | 0, this.cap - this.n));
+    for (let a = 0; a < add; a++) this.spawn(this.n++, null);
+    if (add) {
+      this.extinctAt = null;
+      this.hash.build(this.x, this.z, this.n);
+      this.socialGraph();
+    }
+    return add;
   }
 
-  // energy-proportional choice among the living for births
-  pickParent() {
-    let total = 0;
-    const w = (i) => (this.hp[i] > 0 ? Math.max(0, this.energy[i]) : 0); // the dying do not breed
-    for (let i = 0; i < this.n; i++) total += w(i);
-    if (total <= 0) return Math.floor(this.rng() * this.n);
-    let r = this.rng() * total;
-    for (let i = 0; i < this.n; i++) {
-      r -= w(i);
-      if (r <= 0) return i;
+  // a fly's slot, or -1 once it has died; `hint` is where it was last seen
+  slotOf(id, hint = -1) {
+    if (hint >= 0 && hint < this.n && this.id[hint] === id) return hint;
+    for (let i = 0; i < this.n; i++) if (this.id[i] === id) return i;
+    return -1;
+  }
+
+  livingOffspring(id) {
+    let c = 0;
+    for (let i = 0; i < this.n; i++) if (this.parent[i] === id) c++;
+    return c;
+  }
+
+  // a piece of brood placed at random on the sugar, at any stage of development
+  seedBrood() {
+    const R = this.rng, P = this.params;
+    const food = this.patches.filter((p) => !p.bitter);
+    const p = food[Math.floor(R() * food.length)];
+    const a = R() * TAU, r = Math.sqrt(R()) * p.r * 0.85;
+    const age = R() * P.develop;
+    this.brood.push({
+      x: p.x + Math.cos(a) * r, z: p.z + Math.sin(a) * r, age, fed: age > EGG_END * P.develop ? 0.5 + 0.5 * R() : 0, vigor: 0.6 + 0.8 * R(),
+      hawk: (R() - 0.5) * 3, gain: 1 + (R() - 0.5) * 0.3, gen: 0, mother: -1,
+    });
+  }
+
+  // label a moment on the population chart (a parameter change, a release…)
+  mark(label) {
+    const last = this.marks.at(-1);
+    // dragging a slider produces a stream of values: keep only the latest one
+    if (last && this.t - last.t < 1.5 && last.key === label.split(" ")[0]) last.label = label;
+    else this.marks.push({ t: this.t, label, key: label.split(" ")[0] });
+    if (this.marks.length > 60) this.marks.shift();
+  }
+
+  // copy fly `from` into slot `to` (the old occupant of `to` is gone)
+  move(from, to) {
+    for (const f of FLY_FIELDS) this[f][to] = this[f][from];
+    this.brains.move(from, to);
+  }
+
+  // Remove dead flies (ascending slot list). The last living fly takes each free
+  // slot, so arrays stay dense; anything holding a slot number is remapped.
+  removeFlies(dead) {
+    const n0 = this.n;
+    const map = new Int32Array(n0), at = new Int32Array(n0); // old slot -> new slot (-1 = gone); slot -> original slot
+    for (let k = 0; k < n0; k++) map[k] = at[k] = k;
+    for (let k = dead.length - 1; k >= 0; k--) {
+      const d = dead[k], last = this.n - 1;
+      map[at[d]] = -1;
+      if (d !== last) {
+        this.move(last, d);
+        map[at[last]] = d;
+        at[d] = at[last];
+      }
+      this.n--;
     }
-    return this.n - 1;
+    const remap = (i) => (i >= 0 && i < n0 ? map[i] : -1);
+    for (const c of this.chasers) c.target = remap(c.target);
+    remapFlies(this, remap);
   }
 
   // Social learning along the proximity graph: a fly compares its recent game
@@ -289,6 +394,7 @@ export class Sim {
   // ------------------------------------------------------------------ heuristics
   choosePatch(i) {
     const opts = [];
+    const P = this.params;
     for (let k = 0; k < this.patches.length; k++) {
       const p = this.patches[k];
       if (p.bitter || p.sugar < 0.08) continue;
@@ -297,10 +403,12 @@ export class Sim {
         sugar: p.sugar * 3 + gauss(this.rng) * 0.15, // noisy perception
         crowd: p.occupants,
         dist: Math.hypot(p.x - this.x[i], p.z - this.z[i]),
+        room: 1 - (p.brood || 0) / Math.max(1e-6, NURSERY_CROWD * larvaRoom(p, P.food)), // spare room for larvae (she smells them)
       });
     }
     if (!opts.length) {
       this.target[i] = -1;
+      this.path[i] = null;
       this.reason[i] = "nothing worth visiting";
       return;
     }
@@ -309,7 +417,7 @@ export class Sim {
       const b = Math.floor(this.rng() * (a + 1));
       [opts[a], opts[b]] = [opts[b], opts[a]];
     }
-    const { best, reason } = takeTheBest(opts);
+    const { best, reason } = takeTheBest(opts, this.gravid(i) ? NURSERY_CUES : undefined);
     this.target[i] = best.k;
     this.reason[i] = reason;
     this.path[i] = null;
@@ -544,15 +652,18 @@ export class Sim {
       let gain = 0;
       if (feeding > 0) {
         gain = feeding * patch.sugar * 1.6 * DT;
-        patch.sugar = Math.max(0, patch.sugar - gain * 0.004);
+        patch.sugar = Math.max(0, patch.sugar - gain * 0.001); // adults sip; the larvae eat the bulk
         if (gain > 0) this.events.feed++;
       }
       this.intake[i] += (gain / DT - this.intake[i]) * 0.02;
-      this.energy[i] = Math.min(12, this.energy[i] + gain - (0.08 + 0.008 * this.speed[i]) * DT);
+      this.energy[i] = Math.min(12, this.energy[i] + gain - (0.08 + 0.008 * this.speed[i]) * P.metabolism * DT);
       this.cooldown[i] -= DT;
+      this.layTimer[i] -= DT;
       this.hurt[i] += DT;
       if (this.hp[i] > 0) this.hp[i] = Math.min(1, this.hp[i] + 0.02 * DT); // wounds heal slowly
       this.age[i] += DT;
+      // aging runs at a rate set by the lifespan now, so a new lifespan bends every fly's remaining life
+      this.wear[i] += DT / (this.life[i] * P.lifespan);
       this.wing[i] += (this.y[i] > 0.05 ? 1.6 : 0.15) * (1 + this.speed[i] * 0.05);
     }
 
@@ -568,6 +679,7 @@ export class Sim {
     if (this.tick % 10 === 0) this.swarmClusters();
     if (this.tick % 30 === 0) this.behaviourModes();
     if (this.tick % 15 === 0) this.recordHistory();
+    if (this.tick % 30 === 0) this.recordPopulation();
   }
 
   noiseTurn(i) {
@@ -658,19 +770,19 @@ export class Sim {
       p.vy += (0.8 - p.y) * 0.05;
       if (p.timer <= 0) {
         p.mode = "patrol";
-        p.timer = 10 + this.rng() * 8;
+        p.timer = Math.max(0.5, this.params.birdEvery - 3.5) * (0.7 + 0.6 * this.rng()); // the dive itself takes 3.5 s
       }
       // the beak catches what it touches; the wings and the pressure wave of the
       // dive batter flies further out, at most once per pass
       for (let i = 0; i < this.n; i++) {
         if (this.hp[i] <= 0 || this.held[i]) continue;
         const d = Math.hypot(this.x[i] - p.x, this.y[i] - p.y, this.z[i] - p.z);
-        if (d < 1.4) {
+        if (d < 1.8) {
           this.wound(i, 1, "eaten");
-        } else if (d < 3.5 && this.hurt[i] > 1) {
-          this.wound(i, 0.25 + 0.45 * (1 - d / 3.5), "eaten");
+        } else if (d < 4 && this.hurt[i] > 1) {
+          this.wound(i, 0.3 + 0.45 * (1 - d / 4), "eaten");
           // the wing beat and wake of the dive send the fly tumbling away and down
-          const a = Math.atan2(this.z[i] - p.z, this.x[i] - p.x), s = 12 * (1 - d / 3.5);
+          const a = Math.atan2(this.z[i] - p.z, this.x[i] - p.x), s = 12 * (1 - d / 4);
           this.push(i, Math.cos(a) * s + p.vx * 0.5, -3, Math.sin(a) * s + p.vz * 0.5);
         }
         if (this.hp[i] <= 0) p.kills++;
@@ -715,13 +827,13 @@ export class Sim {
         const tx = this.x[i] + Math.cos(this.h[i]) * this.speed[i] * lead;
         const tz = this.z[i] + Math.sin(this.h[i]) * this.speed[i] * lead;
         const dx = tx - c.x, dy = this.y[i] + 0.2 - c.y, dz = tz - c.z, d = Math.hypot(dx, dy, dz) + 1e-6;
-        ax = (dx / d) * 40;
-        ay = (dy / d) * 40;
-        az = (dz / d) * 40;
+        ax = (dx / d) * 60;
+        ay = (dy / d) * 60;
+        az = (dz / d) * 60;
         if (Math.hypot(this.x[i] - c.x, this.y[i] - c.y, this.z[i] - c.z) < 1.1) {
-          c.bite = 1.2; // handling time, then the chase resumes
+          c.bite = 0.8; // handling time, then the chase resumes
           this.push(i, c.vx * 0.3, -2, c.vz * 0.3);
-          if (this.wound(i, 0.4, "bitten")) {
+          if (this.wound(i, 0.75, "bitten")) {
             c.kills++;
             c.target = -1;
           }
@@ -734,7 +846,7 @@ export class Sim {
       c.vx += ax * DT;
       c.vy += ay * DT;
       c.vz += az * DT;
-      const sp = Math.hypot(c.vx, c.vy, c.vz), max = 11; // faster than cruising flies, slower than an escape take-off
+      const sp = Math.hypot(c.vx, c.vy, c.vz), max = 13.5; // faster than cruising flies, a shade slower than an escape take-off
       if (sp > max) (c.vx *= max / sp), (c.vy *= max / sp), (c.vz *= max / sp);
       c.x = Math.max(-ARENA / 2, Math.min(ARENA / 2, c.x + c.vx * DT));
       c.y = Math.max(0.3, c.y + c.vy * DT);
@@ -763,28 +875,171 @@ export class Sim {
     return true;
   }
 
+  // Adults court, mate and lay; the dead are removed; brood develops and ecloses.
+  // Nothing tops the population up: its size is whatever births minus deaths leave.
   lifeCycle() {
+    this.breed();
+    const dead = [];
     for (let i = 0; i < this.n; i++) {
-      const old = this.age[i] > this.life[i];
+      const old = this.wear[i] >= 1;
       if (this.energy[i] > 0 && this.hp[i] > 0 && !old) continue;
       const cause = this.cause[i] ?? (this.energy[i] <= 0 ? "starved" : "old");
       this.deaths[cause]++;
-      // the body drops where the fly died and stays a few seconds; its slot is reused for a newborn
-      // it keeps the momentum it died with
+      // the body drops where the fly died, with the momentum it died with, and stays a few seconds
       const c = {
-        x: this.x[i], y: this.y[i], z: this.z[i], h: this.h[i], age: 0, cause,
+        x: this.x[i], y: this.y[i], z: this.z[i], h: this.h[i], age: 0, cause, id: this.id[i], lived: this.age[i],
         vx: this.held[i] ? 0 : Math.cos(this.h[i]) * this.speed[i] + this.kvx[i], vy: this.vy[i],
         vz: this.held[i] ? 0 : Math.sin(this.h[i]) * this.speed[i] + this.kvz[i],
       };
       this.corpses.push(c);
       if (this.corpses.length > 150) this.corpses.shift();
       if (this.killer[i]) collectBody(this, this.killer[i], c, i);
-      const parent = this.pickParent();
-      if (parent !== i && this.energy[parent] > 2) this.energy[parent] -= 1; // reproduction costs energy
-      this.spawn(i, parent === i ? null : parent);
-      this.births++;
-      this.events.birth++;
+      dead.push(i);
     }
+    if (dead.length) this.removeFlies(dead);
+    const before = this.n;
+    this.updateBrood();
+    if (dead.length || this.n !== before) {
+      this.hash.build(this.x, this.z, this.n); // later passes this tick query the new layout
+      this.socialGraph();
+    }
+    if (this.n > this.peak) this.peak = this.n;
+    if (!this.n && !this.brood.length) this.extinctAt ??= this.t;
+  }
+
+  // Courtship happens on the ground: a mature female that meets a mature male
+  // mates and stores his sperm (a later mate replaces it: last-male precedence).
+  // A mated female standing on sugar with energy to spare lays a clutch there.
+  breed() {
+    const P = this.params, R = this.rng;
+    const clutch = Math.max(1, P.clutch | 0);
+    for (let i = 0; i < this.n; i++) {
+      if (this.sex[i] !== 0 || this.age[i] < MATURE_AGE || this.held[i] || this.y[i] > 0.6 || this.hp[i] <= 0) continue;
+      if ((!this.mated[i] || R() < 0.05) && (i + this.tick) % 4 === 0) {
+        for (const j of this.hash.query(this.x[i], this.z[i], 1.5, this.x, this.z, this.tmp)) {
+          if (j >= this.n || this.sex[j] !== 1 || this.age[j] < MATURE_AGE || this.held[j] || this.y[j] > 0.6) continue;
+          this.mated[i] = 1;
+          this.mateHawk[i] = this.hawkGene[j];
+          this.mateGain[i] = this.gainGene[j];
+          this.events.mate++;
+          break;
+        }
+      }
+      if (!this.gravid(i) || this.layTimer[i] > 0) continue;
+      const k = this.patchAt(this.x[i], this.z[i]);
+      const p = k >= 0 ? this.patches[k] : null;
+      if (!p || p.bitter || p.sugar < 0.05) continue; // females lay on food, where the larvae will eat
+      if ((p.brood || 0) > NURSERY_CROWD * larvaRoom(p, P.food)) {
+        // ...but not where larvae already crowd it: she goes looking for another nursery
+        if (this.target[i] === k) (this.target[i] = -1), (this.path[i] = null), (this.decide[i] = 0);
+        this.layTimer[i] = 2; // look again in a while
+        continue;
+      }
+      // a full clutch, or as many eggs as she can afford
+      const eggs = Math.min(clutch, Math.floor((this.energy[i] - LAY_RESERVE) / EGG_COST), BROOD_CAP - this.brood.length);
+      for (let e = 0; e < eggs; e++) {
+        // eggs go in a small cluster under her, kept on the patch
+        let ex = this.x[i] + gauss(R) * 0.5, ez = this.z[i] + gauss(R) * 0.5;
+        const dx = ex - p.x, dz = ez - p.z, d = Math.hypot(dx, dz), lim = p.r * 0.9;
+        if (d > lim) (ex = p.x + (dx / d) * lim), (ez = p.z + (dz / d) * lim);
+        // offspring blend both parents' genes, plus mutation
+        this.brood.push({
+          x: ex, z: ez, age: 0, fed: 0, vigor: 0.6 + 0.8 * R(), gen: this.generation[i] + 1, mother: this.id[i],
+          hawk: (this.hawkGene[i] + this.mateHawk[i]) / 2 + gauss(R) * P.mutation * 0.6,
+          gain: Math.min(1.4, Math.max(0.7, (this.gainGene[i] + this.mateGain[i]) / 2 + gauss(R) * P.mutation * 0.1)),
+        });
+      }
+      this.energy[i] -= EGG_COST * eggs;
+      this.eggsLaid[i] += eggs;
+      this.laid += eggs;
+      this.layTimer[i] = LAY_GAP;
+      if (eggs) this.events.lay++;
+    }
+  }
+
+  // a mated female with the energy for a clutch
+  gravid(i) {
+    return this.sex[i] === 0 && this.mated[i] && this.age[i] >= MATURE_AGE && this.energy[i] >= LAY_RESERVE + EGG_COST * Math.min(4, Math.max(1, this.params.clutch | 0));
+  }
+
+  // Eggs wait; larvae compete for the food of the patch they sit on (larval
+  // competition is what regulates Drosophila populations); pupae wait; then
+  // adults eclose. Competition is a contest: the biggest larvae feed first, so a
+  // crowded patch still raises its share of adults while the smallest starve.
+  updateBrood() {
+    const P = this.params, R = this.rng, D = Math.max(1, P.develop);
+    // a constant hazard that kills the chosen share of the brood over its development
+    const kill = P.larvicide > 0 ? (-Math.log(1 - Math.min(0.999, P.larvicide)) / D) * DT : 0;
+    const eat = DT / ((LARVA_END - EGG_END) * D * 0.7); // a larva with the food to itself is full by 70 % of its stage
+    const groups = this.patches.map(() => []);
+    for (const p of this.patches) p.brood = 0; // eggs and larvae on it, which egg-laying females avoid crowding
+    for (const b of this.brood) {
+      const st = broodStage(b, D), k = st < 2 ? this.patchAt(b.x, b.z) : -1;
+      if (k < 0) continue;
+      this.patches[k].brood++;
+      if (st === 1) groups[k].push(b);
+    }
+    groups.forEach((g, k) => {
+      const p = this.patches[k];
+      if (!g.length || p.bitter) return;
+      // food this patch puts out per tick, in larva-meals: larvae burrow into the
+      // fruit, so it depends on the patch's size, not on what the adults have sipped
+      let food = p.sugar > 0.03 ? larvaRoom(p, P.food) * eat : 0;
+      g.sort((a, b) => b.fed + 0.2 * b.vigor - (a.fed + 0.2 * a.vigor));
+      for (const b of g) {
+        const bite = Math.min(eat * b.vigor, 1 - b.fed, food);
+        if (bite <= 0) continue;
+        b.fed += bite;
+        food -= bite;
+        p.sugar = Math.max(0, p.sugar - bite * LARVA_FOOD);
+      }
+    });
+    let w = 0;
+    for (const b of this.brood) {
+      const was = broodStage(b, D);
+      b.age += DT;
+      const st = broodStage(b, D);
+      let dead = null;
+      if (kill && R() < kill) dead = "poisoned";
+      else if (st === 2 && was === 1 && b.fed < PUPATE_FED) dead = "starved";
+      else if (b.age >= D) {
+        if (this.n < this.cap) {
+          this.spawn(this.n++, b);
+          this.births++;
+          this.events.birth++;
+          continue;
+        }
+        if (b.age > D * 1.3) dead = "crowded"; // no room in the arena: the pupa never ecloses
+      }
+      if (dead) this.broodDeaths[dead]++;
+      else this.brood[w++] = b;
+    }
+    this.brood.length = w;
+  }
+
+  // counts for the population display
+  census() {
+    const D = Math.max(1, this.params.develop);
+    const stages = [0, 0, 0];
+    for (const b of this.brood) stages[broodStage(b, D)]++;
+    let females = 0, mature = 0, mated = 0, age = 0;
+    for (let i = 0; i < this.n; i++) {
+      if (this.sex[i] === 0) {
+        females++;
+        if (this.mated[i]) mated++;
+      }
+      if (this.age[i] >= MATURE_AGE) mature++;
+      age += this.age[i];
+    }
+    return { adults: this.n, females, males: this.n - females, mated, mature, eggs: stages[0], larvae: stages[1], pupae: stages[2], brood: this.brood.length, meanAge: this.n ? age / this.n : 0 };
+  }
+
+  recordPopulation() {
+    const c = this.census();
+    const killed = Object.values(this.deaths).reduce((a, b) => a + b, 0);
+    this.popHistory.push({ t: this.t, adults: c.adults, brood: c.brood, births: this.births, deaths: killed, d: { ...this.deaths }, bd: { ...this.broodDeaths } });
+    // keep the whole run at falling resolution: thin out the older half when full
+    if (this.popHistory.length > 900) this.popHistory = this.popHistory.filter((h, k) => k >= 450 || k % 2 === 0);
   }
 
   updateCorpses() {
@@ -819,11 +1074,11 @@ export class Sim {
       const p = this.patches[k];
       p.age += DT;
       if (p.bitter) continue;
-      p.sugar = Math.min(1, p.sugar + 0.02 * DT);
-      if (p.sugar < 0.03 && p.age > 20) {
-        // exhausted patches reappear somewhere else
+      p.sugar = Math.min(1, p.sugar + 0.02 * this.params.food * DT);
+      if (p.sugar < 0.03 && p.age > 20 / Math.max(0.05, this.params.food)) {
+        // exhausted patches reappear somewhere else (fresh fruit falls more often when food is plentiful)
         this.patches[k] = this.newPatch({ bitter: false });
-        for (let i = 0; i < this.n; i++) if (this.target[i] === k) this.target[i] = -1;
+        for (let i = 0; i < this.n; i++) if (this.target[i] === k) (this.target[i] = -1), (this.path[i] = null);
       }
     }
   }
@@ -864,9 +1119,9 @@ export class Sim {
     this.social = {
       edges: edges.length / 2,
       components: size.size,
-      giant: Math.max(...size.values()),
+      giant: size.size ? Math.max(...size.values()) : 0,
       clustering: this.tick % 15 === 0 ? avgClustering(adj) : this.social.clustering,
-      avgDegree: edges.length / n,
+      avgDegree: n ? edges.length / n : 0,
       leaders: [...lead.values()],
     };
   }
@@ -900,6 +1155,7 @@ export class Sim {
 
   // k-means on each fly's motor/neuromodulatory activity -> behavioural modes
   behaviourModes() {
+    if (this.n < this.params.k) return; // too few flies to cluster
     const { io } = this.cx;
     const B = this.brains;
     const data = [];
@@ -968,7 +1224,7 @@ export class Sim {
   meanEnergy() {
     let s = 0;
     for (let i = 0; i < this.n; i++) s += this.energy[i];
-    return s / this.n;
+    return this.n ? s / this.n : 0;
   }
 }
 

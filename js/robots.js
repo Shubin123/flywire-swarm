@@ -187,6 +187,18 @@ export function collectBody(sim, R, c, i) {
   }
 }
 
+// flies changed slots (a dead fly's slot went to another): follow them
+export function remapFlies(sim, remap) {
+  for (const R of sim.robots) {
+    if ("fly" in R) R.fly = remap(R.fly);
+    if (R.kind === "shooter") R.target = remap(R.target);
+    if (R.caught) {
+      for (const e of R.caught) e.i = remap(e.i);
+      R.caught = R.caught.filter((e) => e.i >= 0);
+    }
+  }
+}
+
 const free = (sim, i) => i >= 0 && i < sim.n && sim.hp[i] > 0 && sim.energy[i] > 0 && !sim.held[i];
 const reach = ARM.L1 + ARM.L2 - 0.5;
 

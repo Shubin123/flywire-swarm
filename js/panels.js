@@ -1,5 +1,5 @@
 // Side panels: tabs, live statistics, charts, the selected-fly card and citations.
-import { MODE_NAMES } from "./sim.js";
+import { MODE_NAMES, MATURE_AGE, broodStage } from "./sim.js";
 import { GAMES, equilibria } from "./game.js";
 import { CLASS_COLORS } from "./brainview.js";
 
@@ -11,6 +11,25 @@ const MODE_TEXT = [
   "octopamine, MDN and touch — contests & crowding",
 ];
 export const swarmColor = (k) => `hsl(${(k * 137.508) % 360} 75% 60%)`;
+
+// how each cause of death reads in a sentence, and its label and colour on the charts
+export const CAUSE_TEXT = {
+  starved: "starved", old: "died of old age", fights: "died of fight wounds", eaten: "was caught by the bird",
+  bitten: "was caught by a dragonfly", picked: "was crushed by the picker arm", netted: "died in the net",
+  shot: "was shot by the ball turret", swatted: "was swatted by the stacker arm",
+};
+const CAUSES = [
+  ["old", "old age", "#8e9aa8"], ["starved", "starved", "#c9b27a"], ["fights", "fights", "#ff8a5c"],
+  ["eaten", "bird", "#ff4d6d"], ["bitten", "dragonflies", "#1fc7c7"], ["picked", "picker arm", "#d98e04"],
+  ["netted", "net", "#4fbf7f"], ["shot", "ball turret", "#e0644e"], ["swatted", "stacker arm", "#6f9bea"],
+];
+const BROOD_CAUSES = [
+  ["starved", "larvae starved", "#b7a98a"], ["poisoned", "larvicide", "#b388ff"], ["crowded", "no room to hatch", "#6b7785"],
+];
+const STAGES = [
+  ["eggs", "#f6f2e4"], ["larvae", "#eadfbf"], ["pupae", "#a8742e"], ["young adults", "#bfe3dc"], ["adults ♀", "#ff8fb1"], ["adults ♂", "#7fb7ff"],
+];
+const clockFmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -32,25 +51,20 @@ function netLine(s) {
 }
 
 export class Panels {
-  constructor({ sim, cx, analysis, refs, brain, onFollow, onDeselect }) {
+  constructor({ sim, cx, analysis, refs, brain, onCamMode, onDeselect }) {
     this.sim = sim;
     this.cx = cx;
     this.an = analysis;
     this.refs = refs;
     this.brain = brain;
-    this.onFollow = onFollow;
+    this.onCamMode = onCamMode;
     this.onDeselect = onDeselect;
     this.selected = -1;
-    this.following = false;
+    this.camMode = "overview";
+    $("#pop-hud").addEventListener("click", () => this.showTab("pop"));
+    $("#pop-hud").addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), this.showTab("pop")));
 
-    document.querySelectorAll(".tabs button").forEach((b) =>
-      b.addEventListener("click", () => {
-        document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
-        document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.id === "tab-" + b.dataset.tab));
-        this.update(this.selected);
-        if (b.dataset.tab === "brain") this.brain.resize();
-      })
-    );
+    document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => this.showTab(b.dataset.tab)));
     document.querySelectorAll("#seg-brain button").forEach((b) =>
       b.addEventListener("click", () => {
         document.querySelectorAll("#seg-brain button").forEach((x) => x.classList.toggle("on", x === b));
@@ -69,6 +83,15 @@ export class Panels {
     this.brainCaption();
   }
 
+  showTab(name) {
+    document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x.dataset.tab === name));
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.id === "tab-" + name));
+    document.body.classList.remove("hide-right");
+    $("#btn-right").setAttribute("aria-pressed", "true");
+    this.update(this.selected);
+    if (name === "brain") this.brain.resize();
+  }
+
   // ------------------------------------------------------------------ legend & fly card
   legend(mode) {
     const g = GAMES[this.sim().params.game];
@@ -78,16 +101,15 @@ export class Panels {
     else if (mode === "swarm") html = `<span>colour = DBSCAN swarm</span><span><i class="sw" style="background:#6b7785"></i>noise</span>`;
     else if (mode === "health") html = `<span><i class="sw" style="background:hsl(120 85% 54%)"></i>unhurt</span><span><i class="sw" style="background:hsl(60 85% 43%)"></i>wounded</span><span><i class="sw" style="background:hsl(0 85% 32%)"></i>near death</span><span>white flash = hit</span>`;
     else if (mode === "mode") html = MODE_NAMES.map((m, i) => `<span><i class="sw" style="background:${MODE_COLORS[i]}"></i>${m}</span>`).join("");
+    else if (mode === "age") html = `<span><i class="sw" style="background:hsl(162 35% 80%)"></i>not yet mature</span><span><i class="sw" style="background:hsl(130 70% 55%)"></i>young</span><span><i class="sw" style="background:hsl(65 42% 45%)"></i>middle-aged</span><span><i class="sw" style="background:hsl(0 15% 35%)"></i>near the end</span>`;
     else html = `<span><i class="sw" style="background:hsl(0 75% 35%)"></i>starving</span><span><i class="sw" style="background:hsl(120 75% 60%)"></i>well fed</span>`;
     if (mode !== "health") html += `<span>darker = wounded</span>`;
-    html += `<span><i class="sw" style="background:#f2a541"></i>sugar</span><span><i class="sw" style="background:#9a5cff"></i>bitter</span><span>◆ social-graph leader</span>`;
+    html += `<span><i class="sw" style="background:#f2a541"></i>sugar</span><span><i class="sw" style="background:#9a5cff"></i>bitter</span><span><i class="sw" style="background:#f6f2e4"></i>eggs · <i class="sw" style="background:#eadfbf;margin-left:2px"></i>larvae · <i class="sw" style="background:#a8742e;margin-left:2px"></i>pupae</span><span>◆ social-graph leader</span>`;
     $("#legend").innerHTML = html;
   }
 
   selectFly(i) {
     this.selected = i;
-    this.following = false;
-    this.onFollow(false);
     $("#flycard").classList.toggle("hidden", i < 0);
     this.brainCaption();
     this.update(i);
@@ -99,9 +121,20 @@ export class Panels {
     const strat = s.disposition(i);
     const g = GAMES[s.params.game];
     const last = s.lastHawk[i] < 0 ? "–" : s.lastHawk[i] ? g.A : g.B;
-    $("#flycard").innerHTML = `<span class="close" title="Deselect">✕</span>
-      <b>Fly #${s.id[i]}</b> <span class="note">gen ${s.generation[i]}${s.parent[i] >= 0 ? ` · parent #${s.parent[i]}` : ""}</span>
+    const female = s.sex[i] === 0, life = s.age[i] + (1 - s.wear[i]) * s.life[i] * s.params.lifespan; // expected age at death
+    const stage = s.age[i] < MATURE_AGE ? "just eclosed" : female ? (s.mated[i] ? "mated" : "not mated yet") : "mature";
+    const held = s.held[i] === 1 ? " · trapped in the net" : s.held[i] === 2 ? " · in the killing jar" : "";
+    $("#flycard").innerHTML = `<span class="close" title="Deselect (Esc)">✕</span>
+      <b>Fly #${s.id[i]}</b> <span class="${female ? "sexf" : "sexm"}">${female ? "♀" : "♂"}</span> <span class="note">gen ${s.generation[i]}${s.parent[i] >= 0 ? ` · mother #${s.parent[i]}` : ""}</span>
+      <div class="cam-btns">
+        <button class="btn${this.camMode === "chase" ? " on" : ""}" data-cam="chase" title="Highlight it and keep the camera on it (F)">Follow</button>
+        <button class="btn${this.camMode === "fpv" ? " on" : ""}" data-cam="fpv" title="See the arena through its eyes (V)">First person</button>
+        <button class="btn${this.camMode === "overview" ? " on" : ""}" data-cam="overview" title="Back to the overview (Esc)">Overview</button>
+      </div>
       <div class="kv">${kv([
+        ["age", `${Math.round(s.age[i])} / ~${Math.round(life)} s`],
+        ["stage", stage + held],
+        ...(female ? [["eggs laid · young alive", `${s.eggsLaid[i]} · ${s.livingOffspring(s.id[i])}`]] : []),
         ["health", `${Math.round(100 * Math.max(0, s.hp[i]))}%`],
         ["energy", fmt(s.energy[i], 1)],
         [`${g.A} disposition`, fmt(strat)],
@@ -114,14 +147,165 @@ export class Panels {
         ["behaviour (k-means)", MODE_NAMES[s.mode[i]]],
         ["social degree", s.degree[i]],
         ["connectome gain", fmt(s.params.gain * s.gainGene[i], 1)],
-      ])}</div>
-      <button class="btn small wide" id="btn-follow">${this.following ? "Stop following" : "Follow with camera"}</button>`;
+      ])}</div>`;
     $("#flycard .close").onclick = () => this.onDeselect();
-    $("#btn-follow").onclick = () => {
-      this.following = !this.following;
-      this.onFollow(this.following);
-      this.flyCard(i);
+    $("#flycard").querySelectorAll("[data-cam]").forEach((b) => (b.onclick = () => this.onCamMode(b.dataset.cam)));
+  }
+
+  // what you see through the followed fly's eyes, under the view
+  fpvLabel(i) {
+    const s = this.sim();
+    if (i < 0) return;
+    const bar = (v, c) => `<span class="bar2"><i style="width:${Math.round(100 * Math.max(0, Math.min(1, v)))}%;background:${c}"></i></span>`;
+    const doing = s.held[i] ? "trapped" : s.escape[i] > 0 ? "escaping!" : s.feeding[i] ? "feeding" : s.y[i] < 0.6 ? "walking" : "flying";
+    $("#fpv-label").innerHTML = `Fly #${s.id[i]} ${s.sex[i] ? "♂" : "♀"} · ${doing} · energy${bar(s.energy[i] / 12, "#7ddc8a")}health${bar(s.hp[i], "#ff6b6b")}age ${Math.round(s.age[i])} s · drag to look · Esc to leave`;
+  }
+
+  // ------------------------------------------------------------------ population: HUD on the stage and the tab
+  hud() {
+    const s = this.sim(), c = s.census(), H = s.popHistory;
+    const el = $("#pop-hud");
+    el.classList.toggle("extinct", s.extinctAt != null);
+    $("#pop-adults").textContent = c.adults;
+    // births and deaths per second over the last ~30 s
+    const ref = H.findLast((h) => s.t - h.t >= 30) ?? H[0];
+    const dt = ref ? s.t - ref.t : 0;
+    const deaths = Object.values(s.deaths).reduce((a, b) => a + b, 0);
+    const bRate = dt > 2 ? (s.births - ref.births) / dt : 0, dRate = dt > 2 ? (deaths - ref.deaths) / dt : 0;
+    const trend = dt > 2 ? (c.adults - ref.adults) : 0;
+    const tr = $("#pop-trend");
+    tr.textContent = s.extinctAt != null ? "extinct" : dt > 2 ? `${trend > 0 ? "▲" : trend < 0 ? "▼" : "■"} ${trend > 0 ? "+" : ""}${trend} / ${Math.round(dt)} s` : "";
+    tr.className = `pop-trend ${s.extinctAt != null || trend < -2 ? "down" : trend > 2 ? "up" : ""}`;
+    $("#pop-sub").textContent = `♀ ${c.females} ♂ ${c.males} · ${c.eggs} eggs · ${c.larvae} larvae · ${c.pupae} pupae`;
+    $("#pop-rate").textContent = s.extinctAt != null ? `died out at ${clockFmt(s.extinctAt)} — release flies to try again` : `${fmt(bRate, 1)} hatch/s · ${fmt(dRate, 1)} die/s · peak ${s.peak}`;
+    // sparkline of the last five minutes
+    const cv = $("#pop-spark"), ctx = setupCanvas(cv), W = cv.clientWidth, Hh = cv.clientHeight;
+    ctx.clearRect(0, 0, W, Hh);
+    const pts = H.filter((h) => s.t - h.t <= 300).concat([{ t: s.t, adults: c.adults, brood: c.brood }]);
+    const max = Math.max(20, ...pts.map((h) => Math.max(h.adults, h.brood))) * 1.1;
+    const X = (t) => W - ((s.t - t) / 300) * W, Y = (v) => Hh - 2 - (v / max) * (Hh - 4);
+    const line = (key, color, dash) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      pts.forEach((h, k) => (k ? ctx.lineTo(X(h.t), Y(h[key])) : ctx.moveTo(X(h.t), Y(h[key]))));
+      ctx.stroke();
+      ctx.setLineDash([]);
     };
+    line("brood", "rgba(234,223,191,0.55)", [3, 3]);
+    line("adults", css("--accent"), []);
+    for (const m of s.marks) {
+      if (s.t - m.t > 300) continue;
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.fillRect(Math.round(X(m.t)), 0, 1, Hh);
+    }
+  }
+
+  updatePopulation(c) {
+    const s = this.sim(), H = s.popHistory;
+    const deaths = Object.values(s.deaths).reduce((a, b) => a + b, 0);
+    $("#pop-top").innerHTML = [
+      [c.adults, "adult flies"], [c.brood, "eggs, larvae, pupae"], [s.extinctAt != null ? "extinct" : clockFmt(s.t), s.extinctAt != null ? `at ${clockFmt(s.extinctAt)}` : "time"],
+      [s.births.toLocaleString(), "hatched"], [deaths.toLocaleString(), "adults died"], [s.peak, "peak adults"],
+    ].map(([v, l]) => `<div><b>${v}</b><small>${l}</small></div>`).join("");
+    this.chartPop();
+    const youngAdults = c.adults - c.mature;
+    let fM = 0, mM = 0;
+    for (let i = 0; i < s.n; i++) if (s.age[i] >= MATURE_AGE) s.sex[i] ? mM++ : fM++;
+    const counts = [c.eggs, c.larvae, c.pupae, youngAdults, fM, mM];
+    const top = Math.max(1, ...counts);
+    $("#pop-stages").innerHTML = STAGES.map(([l, col], k) => `<div class="stage-row"><span>${l}</span><div class="track"><div class="fill" style="width:${(100 * counts[k]) / top}%;background:${col}"></div></div><span class="n">${counts[k]}</span></div>`).join("") +
+      `<p class="note" style="margin-top:4px">${c.mated} of ${c.females} females mated · mean adult age ${Math.round(c.meanAge)} s</p>`;
+    // deaths by cause over the last minute (from the population history)
+    const ref = H.findLast((h) => s.t - h.t >= 60) ?? H[0];
+    const win = ref ? s.t - ref.t : 0;
+    const rows = [...CAUSES.map(([k, l, col]) => [l, col, s.deaths[k] - (ref?.d?.[k] ?? 0)]), ...BROOD_CAUSES.map(([k, l, col]) => [l, col, s.broodDeaths[k] - (ref?.bd?.[k] ?? 0)])]
+      .filter((r) => r[2] > 0)
+      .sort((a, b) => b[2] - a[2]);
+    const most = Math.max(1, ...rows.map((r) => r[2]));
+    $("#pop-deaths").innerHTML = rows.length
+      ? rows.map(([l, col, v]) => `<div class="cause-row"><span>${l}</span><div class="track"><div class="fill" style="width:${(100 * v) / most}%;background:${col}"></div></div><span class="n">${v}</span></div>`).join("") + `<p class="note">over the last ${Math.round(win)} s</p>`
+      : `<p class="note">No deaths yet.</p>`;
+    const killed = ["eaten", "bitten", "picked", "netted", "shot", "swatted"].reduce((a, k) => a + s.deaths[k], 0);
+    $("#pop-totals").innerHTML = kv([
+      ["eggs laid", s.laid.toLocaleString()],
+      ["adults hatched / eggs laid", s.laid ? `${Math.round((100 * s.births) / s.laid)}%` : "–"],
+      ["adults killed by anti-fly measures", deaths ? `${killed.toLocaleString()} (${Math.round((100 * killed) / deaths)}%)` : "0"],
+      ["natural deaths (age, hunger, fights)", (deaths - killed).toLocaleString()],
+      ["brood lost (starved · larvicide · no room)", `${s.broodDeaths.starved} · ${s.broodDeaths.poisoned} · ${s.broodDeaths.crowded}`],
+      ["max generation", s.n ? Math.max(...s.generation.slice(0, s.n)) : "–"],
+    ]);
+  }
+
+  chartPop() {
+    const s = this.sim(), cv = $("#chart-pop");
+    const ctx = setupCanvas(cv);
+    const W = cv.clientWidth, H = cv.clientHeight;
+    const hist = s.popHistory;
+    ctx.clearRect(0, 0, W, H);
+    const pad = { l: 30, r: 6, t: 8, b: 18 };
+    if (hist.length < 2) return;
+    const t0 = hist[0].t, t1 = Math.max(t0 + 1, hist.at(-1).t);
+    const max = Math.max(40, ...hist.map((h) => Math.max(h.adults, h.brood))) * 1.1;
+    const X = (t) => pad.l + ((W - pad.l - pad.r) * (t - t0)) / (t1 - t0);
+    const Y = (v) => pad.t + (H - pad.t - pad.b) * (1 - v / max);
+    ctx.font = "10px Inter, sans-serif";
+    ctx.lineWidth = 1;
+    const step = max > 600 ? 200 : max > 250 ? 100 : 50;
+    for (let v = 0; v <= max; v += step) {
+      ctx.strokeStyle = css("--line");
+      ctx.beginPath();
+      ctx.moveTo(pad.l, Y(v));
+      ctx.lineTo(W - pad.r, Y(v));
+      ctx.stroke();
+      ctx.fillStyle = css("--muted");
+      ctx.fillText(v, 4, Y(v) + 3);
+    }
+    if (max > s.cap) {
+      ctx.strokeStyle = "rgba(255,107,107,0.4)";
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(pad.l, Y(s.cap));
+      ctx.lineTo(W - pad.r, Y(s.cap));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.fillStyle = css("--muted");
+    ctx.fillText(clockFmt(t0), pad.l, H - 4);
+    ctx.fillText(clockFmt(t1), W - 30, H - 4);
+    // your parameter changes, newest labelled
+    ctx.save();
+    for (const [k, m] of s.marks.entries()) {
+      if (m.t < t0) continue;
+      const x = Math.round(X(m.t)) + 0.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t);
+      ctx.lineTo(x, H - pad.b);
+      ctx.stroke();
+      if (k >= s.marks.length - 4) {
+        ctx.fillStyle = "rgba(230,237,243,0.75)";
+        ctx.fillText(m.label, Math.min(x + 3, W - ctx.measureText(m.label).width - 4), pad.t + 9 + (k % 4) * 11);
+      }
+    }
+    ctx.restore();
+    const line = (key, color, dash, width) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      hist.forEach((h, k) => (k ? ctx.lineTo(X(h.t), Y(h[key])) : ctx.moveTo(X(h.t), Y(h[key]))));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    line("brood", "rgba(234,223,191,0.6)", [4, 3], 1.5);
+    line("adults", css("--accent"), [], 2.2);
+    if (s.extinctAt != null) {
+      ctx.fillStyle = css("--bad");
+      ctx.fillText("✕ extinct", Math.min(X(s.extinctAt) + 3, W - 50), Y(0) - 4);
+    }
+    $("#pop-legend").innerHTML = `<span><i style="background:var(--accent)"></i>adult flies</span><span><i style="background:rgba(234,223,191,.6)"></i>eggs + larvae + pupae</span><span><i style="background:rgba(255,255,255,.35)"></i>your changes</span>${max > s.cap ? `<span><i style="background:rgba(255,107,107,.5)"></i>arena limit (${s.cap})</span>` : ""}`;
   }
 
   // ------------------------------------------------------------------ brain tab
@@ -242,6 +426,7 @@ export class Panels {
     if (tab === "game") this.updateGame();
     if (tab === "graph") this.updateGraph();
     if (tab === "cluster") this.updateCluster();
+    if (tab === "pop") this.updatePopulation(s.census());
   }
 
   updateGame() {
@@ -272,7 +457,7 @@ export class Panels {
       ["robot kills: picked / net / shot / swatted", `${s.deaths.picked} / ${s.deaths.netted} / ${s.deaths.shot} / ${s.deaths.swatted}`],
       ["stacker: stack · done · knocked · best", stackerLine(s)],
       ["net: in the bag · jarred · escaped", netLine(s)],
-      ["births · max generation", `${s.births} · ${Math.max(...s.generation.slice(0, s.n))}`],
+      ["hatched · max generation", `${s.births} · ${s.n ? Math.max(...s.generation.slice(0, s.n)) : "–"}`],
     ]);
     this.chartHawk();
   }
@@ -400,9 +585,14 @@ export class Panels {
       Jostling drives Johnston's organ neurons → MDN backing up (Bidaye et al. 2014). Octopaminergic cell types bias the fly toward the selfish option in the chosen game (Hoyer et al. 2008; Zhou, Rao &amp; Rao 2008).</p>
       <p><b>Games and learning.</b> Flies on food play Hawk–Dove, the Prisoner's Dilemma or the Stag Hunt with expected payoffs. Every ~8 s a fly
       compares its recent payoff with a graph neighbour's (or anyone's) and copies that fly's disposition with the Fermi probability
-      (Traulsen, Nowak &amp; Pacheco 2006); births are proportional to energy. Losers are jostled but not chased off, and payoffs are scaled
+      (Traulsen, Nowak &amp; Pacheco 2006); offspring inherit the mean of both parents' dispositions, plus mutation. Losers are jostled but not chased off, and payoffs are scaled
       so one contest rarely kills: both choices keep pairings random and avoid survivorship bias, so the replicator-equation
       predictions remain a fair yardstick.</p>
+      <p><b>Life cycle.</b> Flies are female or male. A mature female that meets a mature male on the ground mates and stores his sperm (a later
+      mate replaces it). With energy to spare she lays a clutch on a sugar patch, avoiding fruit already crowded with eggs and larvae. Eggs hatch into larvae
+      that compete for the fruit they sit in — the biggest feed first — and those that ate too little die at pupation; larval competition is
+      what regulates real <i>Drosophila</i> populations. Pupae eclose as pale adults whose reserves depend on how well they ate. Adults die of old age,
+      hunger, fights, the bird, dragonflies or the robots, so the population is whatever births minus deaths leave.</p>
       <p><b>Honest limitations.</b> This is an illustration, not a biophysical model. The reduction lumps neurons by cell type, keeps the
       strongest ~15 inputs per node, and replaces spiking neurons with a 4-hop rate propagation so hundreds of brains can run in a background Web Worker.
       Lumping removes the sparse coding of the real olfactory system, so odour only sets arousal here; odour-guided search is done by

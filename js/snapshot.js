@@ -6,17 +6,19 @@ import { Sim, ARENA } from "./sim.js";
 import { NavGrid } from "./heuristics.js";
 import { GameStats } from "./game.js";
 
-export const SNAPSHOT_VERSION = 2;
+export const SNAPSHOT_VERSION = 3; // 3: life cycle (sexes, brood, variable population)
 
 // per-fly arrays (structure of arrays) copied straight across
 const FLY_ARRAYS = [
   "x", "z", "y", "h", "speed", "vy", "energy", "age", "life", "hp", "hurt", "hawkGene", "gainGene", "intake", "wing",
   "escape", "cooldown", "decide", "oa", "residence", "payoff", "played", "lastHawk", "target", "pathIdx", "swarm",
   "mode", "comp", "degree", "generation", "feeding", "parent", "id", "kvx", "kvz", "held",
+  "sex", "mated", "mateHawk", "mateGain", "layTimer", "eggsLaid", "wear",
 ];
 const PLAIN = [
   "n", "t", "tick", "births", "deaths", "nextId", "params", "obstacles", "patches", "predator", "chasers", "theoryX",
   "history", "kmeansCentroids", "modeCounts", "modeNames", "swarms", "social", "astarStats", "events", "reason", "path",
+  "laid", "broodDeaths", "brood", "peak", "extinctAt", "popHistory", "marks",
 ];
 
 export function snapshot(sim, ui = {}) {
@@ -34,6 +36,7 @@ export function snapshot(sim, ui = {}) {
 }
 
 export function restore(cx, s) {
+  if (s.v === 2) s = upgradeV2(s);
   if (s.v !== SNAPSHOT_VERSION) throw new Error(`snapshot version ${s.v} is not supported (expected ${SNAPSHOT_VERSION})`);
   if (s.N !== cx.N) throw new Error(`snapshot was made with a ${s.N}-node connectome, this build has ${cx.N}`);
   const sim = new Sim(cx, { flies: s.n, params: s.params });
@@ -50,6 +53,21 @@ export function restore(cx, s) {
   sim.grid = new NavGrid(ARENA, 60, sim.obstacles);
   sim.adj = null; // rebuilt by the next social-graph pass
   return sim;
+}
+
+// Version 2 had a fixed-size swarm with no sexes or brood: give every fly a sex,
+// treat it as unmated, make `life` a share of the mean lifespan, and start empty brood.
+function upgradeV2(s) {
+  const cap = s.cap, n = s.n;
+  const sex = new Int8Array(cap);
+  for (let i = 0; i < n; i++) sex[i] = i % 2;
+  const life = Float32Array.from(s.life, (v) => v / 105);
+  const wear = Float32Array.from(s.age, (a, i) => Math.min(0.99, a / (s.life[i] || 105)));
+  return {
+    ...s, v: 3, life, wear, sex, mated: new Int8Array(cap), mateHawk: new Float32Array(cap), mateGain: new Float32Array(cap),
+    layTimer: new Float32Array(cap), eggsLaid: new Int32Array(cap), laid: 0, broodDeaths: { starved: 0, poisoned: 0, crowded: 0 },
+    brood: [], peak: n, extinctAt: null, popHistory: [], marks: [], events: { mate: 0, lay: 0, ...s.events },
+  };
 }
 
 // JSON with typed arrays as { $ta: type, b64 }

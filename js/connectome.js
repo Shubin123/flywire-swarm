@@ -134,6 +134,8 @@ export class BrainPool {
     this.noise = 0.03;
     this.worker = null;
     this.busy = false;
+    this.owner = null; // the Sim, whose id[] says which fly is in which slot
+    this.sentIds = null;
   }
 
   enableWorker(url) {
@@ -146,7 +148,7 @@ export class BrainPool {
     this.worker.postMessage({ init: { N, inPtr, inSrc, inW } });
     this.worker.onmessage = (e) => {
       this.busy = false;
-      this.blend(e.data.P, e.data.count);
+      this.blend(e.data.P, e.data.count, this.sentIds);
     };
     this.worker.onerror = () => {
       this.worker.terminate();
@@ -189,6 +191,7 @@ export class BrainPool {
       if (this.busy) return; // the worker is still on the previous tick
       this.busy = true;
       const I = this.I.slice(0, count * this.N);
+      this.sentIds = this.owner ? this.owner.id.slice(0, count) : null;
       this.worker.postMessage(
         { I, gains: this.gain.slice(0, count), count, hops: this.hops, theta: this.theta, noise: this.noise, silenced: sil },
         [I.buffer]
@@ -199,14 +202,30 @@ export class BrainPool {
     this.blend(this.P, count);
   }
 
-  blend(P, count) {
-    const { R, alpha } = this;
-    const n = Math.min(count * this.N, R.length);
-    for (let k = 0; k < n; k++) R[k] += alpha * (P[k] - R[k]);
+  // ids: which fly was in each slot when P was computed. Flies die and slots are
+  // refilled while the worker runs, so rows are matched to flies by id.
+  blend(P, count, ids = null) {
+    const { R, alpha, N } = this;
+    const o = this.owner;
+    let same = !ids || !o || o.n === count;
+    for (let f = 0; same && ids && f < count; f++) same = o.id[f] === ids[f];
+    if (same) {
+      const n = Math.min(count * N, R.length);
+      for (let k = 0; k < n; k++) R[k] += alpha * (P[k] - R[k]);
+      return;
+    }
+    const row = new Map();
+    for (let f = 0; f < count; f++) row.set(ids[f], f);
+    for (let f = 0; f < o.n; f++) {
+      const src = row.get(o.id[f]);
+      if (src === undefined) continue; // eclosed after the worker started
+      for (let k = 0, a = f * N, b = src * N; k < N; k++) R[a + k] += alpha * (P[b + k] - R[a + k]);
+    }
   }
 
-  // copy the brain state of fly a into fly b (used when flies reproduce)
-  copy(a, b) {
+  // move fly a's brain state into slot b (when b's fly has died)
+  move(a, b) {
     this.R.copyWithin(b * this.N, a * this.N, (a + 1) * this.N);
+    this.I.copyWithin(b * this.N, a * this.N, (a + 1) * this.N);
   }
 }

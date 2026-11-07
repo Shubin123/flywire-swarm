@@ -2,14 +2,14 @@
 // swarm with the 2D canvas API, projecting through the same three.js camera so
 // orbit controls and fly picking keep working unchanged.
 import * as THREE from "three";
-import { ARENA } from "./sim.js";
+import { ARENA, broodStage } from "./sim.js";
 import { NET, JAR, netIndex } from "./robots.js";
 
 const STONE = "#3a4652", STONE_TOP = "#4b5a68";
 
 export class CanvasRenderer {
   constructor(getState) {
-    this.getState = getState; // () => ({ sim, settings, selected, flyColor })
+    this.getState = getState; // () => ({ sim, settings, selected, flyColor, camMode })
     this.domElement = document.createElement("canvas");
     this.domElement.style.display = "block";
     this.ctx = this.domElement.getContext("2d");
@@ -87,7 +87,7 @@ export class CanvasRenderer {
 
   render(scene, camera) {
     this.camera = camera;
-    const { sim, settings, selected, flyColor } = this.getState();
+    const { sim, settings, selected, flyColor, camMode } = this.getState();
     const ctx = this.ctx, H = ARENA / 2;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = "#0b0f14";
@@ -106,6 +106,15 @@ export class CanvasRenderer {
     for (const p of sim.patches) {
       const a = p.bitter ? 0.45 : 0.15 + 0.6 * p.sugar;
       this.polygon(this.circle(p.x, 0.02, p.z, p.r), p.bitter ? `rgba(154,92,255,${a})` : `rgba(242,165,65,${a})`, p.bitter ? "#c9a6ff" : "#ffd28a");
+    }
+
+    // brood on the food: eggs, larvae, pupae
+    const D = Math.max(1, sim.params.develop), BROOD = ["#f6f2e4", "#eadfbf", "#a8742e"];
+    for (const b of sim.brood) {
+      const p = this.project(b.x, 0.05, b.z);
+      if (!p) continue;
+      ctx.fillStyle = BROOD[broodStage(b, D)];
+      ctx.fillRect(p[0] - 1, p[1] - 1, Math.max(1.5, 0.25 * p[2]), Math.max(1.5, 0.25 * p[2]));
     }
 
     // social graph
@@ -158,6 +167,7 @@ export class CanvasRenderer {
     const dist = (i) => (sim.x[i] - cam.x) ** 2 + (sim.z[i] - cam.z) ** 2;
     order.sort((a, b) => dist(b) - dist(a));
     for (const i of order) {
+      if (i === selected && camMode === "fpv") continue; // we are looking out of its eyes
       const x = sim.x[i], y = sim.y[i] + 0.25, z = sim.z[i], h = sim.h[i];
       const g = this.project(x, 0.02, z);
       if (g) {
@@ -208,9 +218,10 @@ export class CanvasRenderer {
         ctx.lineTo(p[0] - 3, p[1]);
         ctx.fill();
       }
-    if (selected >= 0 && selected < sim.n) {
+    if (selected >= 0 && selected < sim.n && camMode !== "fpv") {
       ctx.lineWidth = 2;
-      this.polygon(this.circle(sim.x[selected], 0.05, sim.z[selected], 1), null, "#ffffff");
+      this.polygon(this.circle(sim.x[selected], 0.05, sim.z[selected], 1.2), null, "#ffffff");
+      this.line([sim.x[selected], sim.y[selected] + 1, sim.z[selected]], [sim.x[selected], sim.y[selected] + 30, sim.z[selected]], "rgba(255,224,138,0.45)", 3);
     }
 
     // pillars (drawn last so they occlude what is behind them roughly correctly)

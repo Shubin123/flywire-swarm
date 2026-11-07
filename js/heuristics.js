@@ -118,6 +118,9 @@ export const PATCH_CUES = [
   { key: "dist", label: "closer", better: (a, b) => b.dist - a.dist, jnd: 3 },
 ];
 
+// a female carrying eggs looks for a nursery first: a patch whose larvae still have room
+export const NURSERY_CUES = [{ key: "room", label: "room for her larvae", better: (a, b) => a.room - b.room, jnd: 0.3 }, ...PATCH_CUES];
+
 export function takeTheBest(options, cues = PATCH_CUES) {
   let best = options[0];
   let reason = "only option";

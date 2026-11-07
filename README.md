@@ -13,7 +13,7 @@ inside the simulation.
 senses ──► sensory neurons ──► reduced FlyWire connectome (618 cell types, 9,144 signed edges) ──► descending / motor neurons ──► body
    ▲                                         ▲                                                          │
    │                  heuristic goal (A*) ──► PFL3                                                     ▼
- world ◄── Hawk–Dove contests, birth–death selection, DBSCAN swarms, social graph, predator ◄──── behaviour
+ world ◄── Hawk–Dove contests, life cycle, DBSCAN swarms, social graph, predators, robots ◄──── behaviour
 ```
 
 | Connectome pathway (real FlyWire wiring) | Behaviour in the swarm |
@@ -37,7 +37,8 @@ The five ideas and how they connect (all ten pairs are explained, with a live me
 
 Pick **Hawk–Dove**, the **Prisoner's Dilemma** (donation game) or the **Stag Hunt**. Flies that meet on food play with expected
 payoffs; every ~8 s a fly compares its recent payoff with a graph neighbour's (or anyone's — a toggle) and copies that fly's
-disposition with the Fermi probability (pairwise comparison, Traulsen, Nowak & Pacheco 2006). Births are proportional to energy.
+disposition with the Fermi probability (pairwise comparison, Traulsen, Nowak & Pacheco 2006). Offspring inherit the mean of
+their parents' dispositions, plus mutation.
 The Game tab shows the payoff matrix, the stable and unstable rest points of the replicator equation, and the population's path.
 Expected outcomes: Hawk share ≈ V/C in Hawk–Dove, all-Defect in the Prisoner's Dilemma, and whichever side of the tipping point
 1 − C/V the Stag Hunt starts on. Mutation and the finite swarm keep the population near, not exactly on, the analytic line.
@@ -66,8 +67,40 @@ Like ArmLab's safety layer, they reject any step that would put a link under the
   and stray balls knock blocks out of the tower.
 
 Wounded flies are slower and heal slowly. A dead fly is a small ballistic body: it falls with the momentum it had, lies
-legs up over a splat for six seconds, and its slot goes to a newborn. Colour by **Health** for green → yellow → red. In
-every other colouring, wounds darken a fly and a hit flashes white.
+legs up over a splat for six seconds. Nothing replaces it: the population is whatever births minus deaths leave. Colour by
+**Health** for green → yellow → red. In every other colouring, wounds darken a fly and a hit flashes white.
+
+### Life cycle and population
+
+Flies go through a compressed *Drosophila* life cycle: **egg → larva → pupa → adult** (20 % / 50 % / 30 % of the
+egg-to-adult time).
+- Adults are female or male. A mature female that meets a mature male on the ground mates and stores his sperm; a later
+  mate replaces it (last-male precedence).
+- With energy to spare, a mated female lays a clutch on a sugar patch. Each egg costs energy, so hunger and a high
+  metabolism cut egg supply. A female carrying eggs picks her next patch by take-the-best with an extra first cue, room
+  for her larvae, and she will not lay where eggs and larvae already crowd the fruit.
+- Larvae compete for the fruit they sit in, and the biggest feed first (contest competition). Those that ate too little
+  die at pupation. As in real *Drosophila*, larval competition is what regulates the population: births have a ceiling
+  set by how much fruit there is, so each adult killed lowers the count rather than being replaced.
+- Pupae eclose as pale adults whose reserves depend on how well they ate as larvae. Adults age (a new lifespan changes how
+  fast every fly ages from then on), and they die of old age, hunger, fights, the bird, dragonflies or the robots.
+
+A counter over the arena shows the live number of adults, the sexes, the brood at each stage, hatch and death rates, and
+a five-minute sparkline. The **Population** tab charts the whole run, with a tick at each change you make. It also breaks
+down the brood by stage and shows the last minute's deaths by cause.
+
+The left panel is split into the two sides of the experiment:
+- **Fly life cycle:** adult lifespan, eggs per clutch, egg-to-adult time, metabolic rate, food, and a button that
+  releases 20 wild flies.
+- **Anti-fly measures:** the bird and how often it dives, dragonflies, larvicide on the food (the share of brood it
+  kills), and the four robots.
+
+Push the anti-fly side hard enough and the swarm dies out.
+
+**Following a fly.** Click a fly to select it and follow it with a highlight: a light beam, a marker and a trail, with the
+orbit camera still free. Double-click it (or press **V**) to see the arena through its eyes; drag to look around. **F**
+toggles following and **Esc** goes back to the overview. When the followed fly dies, a note says how it died and the
+camera returns to the overview.
 
 ### Saving the model
 
@@ -80,9 +113,12 @@ and the whole origin use.
 
 Drag **V** and **C** and watch the played share follow the equilibrium; switch to the Stag Hunt and start on either side of
 the tipping point; silence **MN9** (flies starve), **Giant Fiber** (the predator feasts), **PFL3** (navigation breaks) or **OA-**
-neurons (less selfish play); click a fly to see its brain light up. **Copy link to this setup** puts every setting in the URL,
+neurons (less selfish play); click a fly to see its brain light up, then double-click it to ride along. For the population,
+switch off every anti-fly measure and watch the count climb to the food limit; then add larvicide, or shorten lifespans,
+and watch it fall. **Copy link to this setup** puts every setting in the URL,
 so an experiment can be shared, e.g.
-`https://shubin123.github.io/flywire-swarm/?game=stag&V=4&C=1.5&learn=anyone`.
+`https://shubin123.github.io/flywire-swarm/?game=stag&V=4&C=1.5&learn=anyone` or
+`https://shubin123.github.io/flywire-swarm/?larv=60&drag=8&bird=6`.
 
 ## Honest limitations
 
@@ -125,7 +161,7 @@ content hash, so browsers never mix cached old files with new ones.
 |---|---|
 | `js/connectome.js` | loads the data; batched per-fly brain model |
 | `js/brain-worker.js` | runs the brain propagation off the main thread |
-| `js/sim.js` | the swarm: senses → brain → body, contests, health, predator, dragonflies, life cycle |
+| `js/sim.js` | the swarm: senses → brain → body, contests, health, predator, dragonflies, life cycle (mating, brood, larval competition) |
 | `js/robots.js` | 6-DOF arms (picker, net, stacker) and the ball turret |
 | `js/snapshot.js`, `js/store.js` | model serialisation; the Save panel (IndexedDB, files, storage usage) |
 | `js/game.js` | 2×2 games (Hawk–Dove, Prisoner's Dilemma, Stag Hunt), equilibria, replicator equation |

@@ -3,13 +3,13 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { loadData, Connectome } from "./connectome.js";
-import { Sim, ARENA, CORPSE_LIFE } from "./sim.js";
+import { Sim, ARENA, CORPSE_LIFE, BROOD_CAP, MATURE_AGE, broodStage } from "./sim.js";
 import { NET, JAR, netIndex } from "./robots.js";
 import { analyseConnectome } from "./analysis.js";
 import { BrainView } from "./brainview.js";
 import { Brain2D } from "./brain2d.js";
 import { CanvasRenderer } from "./canvasview.js";
-import { Panels, MODE_COLORS, swarmColor } from "./panels.js";
+import { Panels, MODE_COLORS, swarmColor, CAUSE_TEXT } from "./panels.js";
 import { IdeasMap } from "./ideas.js";
 import { GAMES } from "./game.js";
 import { restore } from "./snapshot.js";
@@ -17,6 +17,7 @@ import { ModelStore } from "./store.js";
 
 const $ = (s) => document.querySelector(s);
 const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const setLoad = (msg, frac) => {
   $("#loader-msg").textContent = msg;
   $("#loader-fill").style.width = `${Math.round(frac * 100)}%`;
@@ -42,11 +43,13 @@ const analysis = analyseConnectome(cx);
 setLoad("Hatching flies…", 0.8);
 
 const settings = { color: "strategy", social: true, path: true, pathsAll: false, speed: 1, paused: false };
-let sim = new Sim(cx, { flies: 220 });
+const START_FLIES = Math.max(20, Math.min(400, +new URLSearchParams(location.search).get("n") || 220));
+let sim = new Sim(cx, { flies: START_FLIES });
 const WORKER_URL = new URL(`./brain-worker.js${BUILD ? "?v=" + BUILD : ""}`, import.meta.url);
 sim.brains.enableWorker(WORKER_URL);
-let selected = -1;
-let follow = false;
+let selected = -1; // slot of the selected fly this frame
+let selId = -1; // its id: slots are reused as flies die, ids never are
+let camMode = "overview"; // "overview" | "chase" (highlighted follow) | "fpv" (through its eyes)
 
 // ------------------------------------------------------------------ renderer & scene
 const stage = $("#stage");
@@ -75,7 +78,7 @@ async function pickRenderer() {
       console.warn("WebGPU unavailable:", err.message);
     }
   }
-  return [new CanvasRenderer(() => ({ sim, settings, selected, flyColor })), "2d"];
+  return [new CanvasRenderer(() => ({ sim, settings, selected, flyColor, camMode })), "2d"];
 }
 const [renderer, RENDER_KIND] = await pickRenderer();
 renderer.setPixelRatio(Math.min(2, devicePixelRatio));
@@ -263,6 +266,32 @@ const selRing = new THREE.Mesh(
 selRing.visible = false;
 scene.add(selRing);
 
+// highlight of the selected fly: a light beam you can find from anywhere, a
+// bobbing marker over its head and a fading trail of where it has been
+const beacon = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.12, 0.35, 40, 12, 1, true).translate(0, 20, 0),
+  new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending })
+);
+const marker = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 4).rotateX(Math.PI), new THREE.MeshBasicMaterial({ color: 0xffe08a }));
+const TRAIL = 120;
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TRAIL * 3), 3).setUsage(THREE.DynamicDrawUsage));
+trailGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(TRAIL * 3), 3).setUsage(THREE.DynamicDrawUsage));
+const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+const trailPts = []; // recent positions of the selected fly, newest last
+for (const m of [beacon, marker, trail]) {
+  m.visible = false;
+  m.frustumCulled = false;
+  scene.add(m);
+}
+
+// brood on the food: eggs, larvae and pupae (one instanced capsule, tinted and stretched per stage)
+const broodMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 8, 6), new THREE.MeshStandardMaterial({ roughness: 0.6 }), BROOD_CAP);
+broodMesh.frustumCulled = false;
+broodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(broodMesh);
+const C_EGG = new THREE.Color(0xf6f2e4), C_LARVA = new THREE.Color(0xeadfbf), C_HUNGRY = new THREE.Color(0x9a9484), C_PUPA = new THREE.Color(0xa8742e), C_PUPA_OLD = new THREE.Color(0x4a2c12);
+
 // predator: a dark swallow-like silhouette
 const predator = new THREE.Group();
 {
@@ -404,18 +433,25 @@ const C_BLOCK = { floor: new THREE.Color(0x8a6a44), held: new THREE.Color(0xd8b3
 // ------------------------------------------------------------------ colours
 const C_HAWK = new THREE.Color(0xff6b4a), C_DOVE = new THREE.Color(0x63d4ff);
 const C_NOISE = new THREE.Color(0x6b7785);
-const C_WOUND = new THREE.Color(0x4a0a0a), C_HIT = new THREE.Color(0xffffff);
+const C_WOUND = new THREE.Color(0x4a0a0a), C_HIT = new THREE.Color(0xffffff), C_TENERAL = new THREE.Color(0xf0e8d2);
 const tmpC = new THREE.Color();
 // every colouring shows health too: wounds darken a fly toward dried blood, and a
-// fresh hit flashes white
+// fresh hit flashes white; a fly that has just eclosed is pale, as real ones are
 function flyColor(i, out) {
   baseColor(i, out);
   if (settings.color !== "health") out.lerp(C_WOUND, 0.75 * (1 - sim.hp[i]));
+  if (sim.age[i] < 3) out.lerp(C_TENERAL, 0.7 * (1 - sim.age[i] / 3));
   if (sim.hurt[i] < 0.25) out.lerp(C_HIT, 0.8 * (1 - sim.hurt[i] / 0.25));
   return out;
 }
 function baseColor(i, out) {
   switch (settings.color) {
+    case "age": {
+      // pale before maturity, then from fresh green through amber to grey as its lifespan runs out
+      if (sim.age[i] < MATURE_AGE) return out.setHSL(0.45, 0.35, 0.8);
+      const a = Math.min(1, sim.wear[i]);
+      return out.setHSL(0.36 - 0.36 * a, 0.7 - 0.55 * a, 0.55 - 0.2 * a);
+    }
     case "health": {
       const hp = Math.max(0, Math.min(1, sim.hp[i]));
       return out.setHSL(0.33 * hp, 0.85, 0.32 + 0.22 * hp); // green → yellow → red
@@ -444,9 +480,11 @@ function updateScene() {
   for (let i = 0; i < n; i++) {
     const x = sim.x[i], y = sim.y[i] + 0.25, z = sim.z[i], h = sim.h[i];
     const pitch = sim.y[i] > 0.3 ? -0.15 : 0;
+    // females are a little larger than males; the fly whose eyes we look through is not drawn
+    const size = i === selected ? (camMode === "fpv" ? 0 : 1.3) : 1;
     dummy.position.set(x, y, z);
     dummy.rotation.set(0, -h, pitch);
-    dummy.scale.setScalar(FLY_SCALE);
+    dummy.scale.setScalar(FLY_SCALE * (sim.sex[i] ? 0.92 : 1.06) * size);
     dummy.updateMatrix();
     bodyMesh.setMatrixAt(i, dummy.matrix);
     eyeMesh.setMatrixAt(i, dummy.matrix);
@@ -462,10 +500,36 @@ function updateScene() {
 
     dummy.position.set(x, 0.02, z);
     dummy.rotation.set(0, 0, 0);
-    dummy.scale.setScalar(Math.max(0.4, 1.4 - sim.y[i] * 0.12));
+    dummy.scale.setScalar(Math.max(0.4, 1.4 - sim.y[i] * 0.12) * Math.min(1, size));
     dummy.updateMatrix();
     shadowMesh.setMatrixAt(i, dummy.matrix);
   }
+
+  // brood: eggs are small white ovals, larvae grow as they eat (grey when hungry)
+  // and wriggle, pupae are brown cases that darken before the adult emerges
+  const D = Math.max(1, sim.params.develop), wig = performance.now() / 260;
+  let nb = 0;
+  for (const b of sim.brood) {
+    if (nb >= BROOD_CAP) break;
+    const st = broodStage(b, D), yaw = ((b.x * 12.9898 + b.z * 78.233) % 6.283) + (st === 1 ? Math.sin(wig + b.x) * 0.5 : 0);
+    dummy.position.set(b.x, 0.07, b.z);
+    dummy.rotation.set(0, yaw, 0);
+    if (st === 0) dummy.scale.set(1.3, 0.55, 0.75), tmpC.copy(C_EGG);
+    else if (st === 1) {
+      const g = 1.2 + 2.2 * b.fed;
+      dummy.scale.set(g, 0.6, 0.6 + 0.2 * b.fed);
+      tmpC.copy(C_HUNGRY).lerp(C_LARVA, Math.min(1, b.fed * 2));
+    } else {
+      dummy.scale.set(2.6, 0.8, 0.95);
+      tmpC.copy(C_PUPA).lerp(C_PUPA_OLD, Math.min(1, (b.age / D - 0.7) / 0.3));
+    }
+    dummy.updateMatrix();
+    broodMesh.setMatrixAt(nb, dummy.matrix);
+    broodMesh.setColorAt(nb++, tmpC);
+  }
+  broodMesh.count = nb;
+  broodMesh.instanceMatrix.needsUpdate = true;
+  if (broodMesh.instanceColor) broodMesh.instanceColor.needsUpdate = true;
   for (const m of [bodyMesh, eyeMesh, wingL, wingR, shadowMesh]) {
     m.count = n;
     m.instanceMatrix.needsUpdate = true;
@@ -533,10 +597,31 @@ function updateScene() {
     allPathGeo.attributes.position.needsUpdate = true;
   }
   if (selected >= 0 && selected < n) {
-    selRing.visible = true;
-    selRing.position.set(sim.x[selected], 0.05, sim.z[selected]);
+    const fx = sim.x[selected], fy = sim.y[selected], fz = sim.z[selected], now = performance.now() / 1000;
+    const outside = camMode !== "fpv";
+    selRing.visible = outside;
+    selRing.position.set(fx, 0.05, fz);
+    selRing.scale.setScalar(1.1 + 0.15 * Math.sin(now * 4));
+    beacon.visible = marker.visible = trail.visible = outside;
+    beacon.position.set(fx, fy + 1.2, fz);
+    marker.position.set(fx, fy + 1.6 + 0.2 * Math.sin(now * 3), fz);
+    marker.rotation.y = now * 2;
+    // trail: one sample every ~0.1 s, fading toward the oldest
+    const lastPt = trailPts.at(-1);
+    if (!lastPt || now - lastPt[3] > 0.1) {
+      trailPts.push([fx, fy + 0.25, fz, now]);
+      if (trailPts.length > TRAIL) trailPts.shift();
+    }
+    const tp = trailGeo.attributes.position.array, tc = trailGeo.attributes.color.array, m = trailPts.length;
+    for (let k = 0; k < m; k++) {
+      const q = k === m - 1 ? [fx, fy + 0.25, fz] : trailPts[k], f = (k + 1) / m;
+      tp.set(q.slice(0, 3), k * 3);
+      tc.set([f, f * 0.88, f * 0.54], k * 3); // additive, so dark = transparent
+    }
+    trailGeo.setDrawRange(0, m);
+    trailGeo.attributes.position.needsUpdate = trailGeo.attributes.color.needsUpdate = true;
     const path = sim.path[selected];
-    pathLine.visible = settings.path && !!path;
+    pathLine.visible = outside && settings.path && !!path;
     if (pathLine.visible) {
       const arr = pathGeo.attributes.position.array;
       arr.set([sim.x[selected], 0.2, sim.z[selected]], 0);
@@ -546,14 +631,8 @@ function updateScene() {
       pathGeo.attributes.position.needsUpdate = true;
       pathLine.computeLineDistances();
     }
-    if (follow) {
-      const target = new THREE.Vector3(sim.x[selected], sim.y[selected], sim.z[selected]);
-      const delta = target.clone().sub(controls.target).multiplyScalar(0.08);
-      controls.target.add(delta);
-      camera.position.add(delta);
-    }
   } else {
-    selRing.visible = false;
+    selRing.visible = beacon.visible = marker.visible = trail.visible = false;
     pathLine.visible = false;
   }
 
@@ -676,6 +755,7 @@ function pick(clientX, clientY) {
   const v = new THREE.Vector3();
   let best = -1, bestD = 22 * 22;
   for (let i = 0; i < sim.n; i++) {
+    if (camMode === "fpv" && i === selected) continue; // the fly we are looking out of
     v.set(sim.x[i], sim.y[i] + 0.3, sim.z[i]).project(camera);
     if (v.z > 1) continue;
     const sx = ((v.x + 1) / 2) * rect.width + rect.left;
@@ -688,18 +768,144 @@ function pick(clientX, clientY) {
   }
   return best;
 }
+// click a fly to follow it (highlighted, orbit still free), double-click to see
+// through its eyes; click empty ground to let go. In first person, drag to look around.
 let downAt = null;
-renderer.domElement.addEventListener("pointerdown", (e) => (downAt = [e.clientX, e.clientY]));
+renderer.domElement.addEventListener("pointerdown", (e) => (downAt = [e.clientX, e.clientY, fp.lookYaw, fp.lookPitch]));
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (!downAt || camMode !== "fpv" || !e.buttons) return;
+  fp.lookYaw = downAt[2] + (e.clientX - downAt[0]) * 0.006;
+  fp.lookPitch = Math.max(-1.2, Math.min(1.2, downAt[3] - (e.clientY - downAt[1]) * 0.006));
+});
 renderer.domElement.addEventListener("pointerup", (e) => {
-  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
+  const moved = !downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5;
+  downAt = null;
+  if (moved) return;
   const i = pick(e.clientX, e.clientY);
-  select(i >= 0 ? i : -1);
+  if (i >= 0) {
+    select(i);
+    if (camMode === "overview") setCamMode("chase");
+  } else if (camMode !== "fpv") {
+    select(-1);
+  }
   $("#hint").style.opacity = 0;
 });
+renderer.domElement.addEventListener("dblclick", (e) => {
+  const i = pick(e.clientX, e.clientY);
+  if (i < 0) return;
+  select(i);
+  setCamMode("fpv");
+});
 function select(i) {
+  const id = i >= 0 ? sim.id[i] : -1;
+  const changed = id !== selId;
+  if (changed) trailPts.length = 0;
+  selId = id;
   selected = i;
-  if (i < 0) follow = false;
+  if (i < 0) setCamMode("overview");
+  else if (changed && camMode !== "overview") glide(); // hop to the new fly
   panels.selectFly(i);
+}
+
+// ------------------------------------------------------------------ camera: overview, highlighted follow, first person
+const BLEND = 0.9; // seconds to glide between camera modes
+const FPV_FOV = 80;
+let baseFov = 45;
+const fp = { yaw: 0, pitch: 0, lookYaw: 0, lookPitch: 0 }; // smoothed head direction and the user's look offset
+const cam = { from: null, k: 1, home: null }; // pose the glide starts from, its progress, the overview pose to return to
+const vPos = new THREE.Vector3(), vLook = new THREE.Vector3(), vFly = new THREE.Vector3();
+const ease = (t) => t * t * (3 - 2 * t);
+
+// start a glide from wherever the camera is now
+function glide() {
+  cam.from = { pos: camera.position.clone(), target: controls.target.clone(), fov: camera.fov };
+  cam.k = 0;
+  if (camMode === "fpv" && selected >= 0) Object.assign(fp, { yaw: sim.h[selected], pitch: 0, lookYaw: 0, lookPitch: 0 });
+}
+
+function setCamMode(mode) {
+  if (mode === camMode || (mode !== "overview" && selected < 0)) return;
+  if (camMode === "overview") cam.home = { pos: camera.position.clone(), target: controls.target.clone() };
+  camMode = mode;
+  glide();
+  controls.enabled = mode === "chase";
+  $("#fpv").classList.toggle("hidden", mode !== "fpv");
+  document.body.classList.toggle("fpv-on", mode === "fpv");
+  panels.camMode = mode;
+  panels.update(selected);
+}
+
+function updateCamera(dt) {
+  cam.k = Math.min(1, cam.k + dt / BLEND);
+  const k = ease(cam.k);
+  if (camMode === "fpv" && selected >= 0) {
+    // the eye sits on the head; heading and pitch are smoothed so the view does not jitter with every wingbeat
+    const i = selected;
+    fp.yaw += wrap(sim.h[i] - fp.yaw) * (1 - Math.exp(-dt * 5));
+    const climb = Math.atan2(sim.vy[i], Math.max(1, sim.speed[i])) * 0.6 - (sim.y[i] > 0.3 ? 0.12 : 0.05);
+    fp.pitch += (climb - fp.pitch) * (1 - Math.exp(-dt * 4));
+    if (!downAt) (fp.lookYaw *= Math.exp(-dt * 0.8)), (fp.lookPitch *= Math.exp(-dt * 0.8)); // drift back to straight ahead
+    const yaw = fp.yaw + fp.lookYaw, pitch = fp.pitch + fp.lookPitch;
+    vPos.set(sim.x[i] + Math.cos(sim.h[i]) * 0.55, sim.y[i] + 0.55, sim.z[i] + Math.sin(sim.h[i]) * 0.55);
+    vLook.set(Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch), Math.sin(yaw) * Math.cos(pitch)).add(vPos);
+    camera.position.lerpVectors(cam.from.pos, vPos, k);
+    controls.target.lerpVectors(cam.from.target, vLook, k);
+    camera.fov = cam.from.fov + (FPV_FOV - cam.from.fov) * k;
+    camera.near = 0.05;
+    camera.updateProjectionMatrix();
+    camera.lookAt(controls.target);
+    return;
+  }
+  if (camera.near !== 0.1 || camera.fov !== baseFov) {
+    camera.near = 0.1;
+    if (cam.from) camera.fov = cam.from.fov + (baseFov - cam.from.fov) * k;
+    camera.updateProjectionMatrix();
+  }
+  if (camMode === "chase" && selected >= 0) {
+    vFly.set(sim.x[selected], sim.y[selected], sim.z[selected]);
+    if (cam.k < 1) {
+      // glide in to a three-quarter view about 18 units from the fly
+      vPos.copy(cam.from.pos).sub(cam.from.target).setLength(18).add(vFly);
+      if (vPos.y < vFly.y + 6) vPos.y = vFly.y + 6;
+      camera.position.lerpVectors(cam.from.pos, vPos, k);
+      controls.target.lerpVectors(cam.from.target, vFly, k);
+    } else {
+      // carry the orbit along with the fly, so the user can still circle and zoom around it
+      vLook.copy(vFly).sub(controls.target).multiplyScalar(1 - Math.exp(-dt * 10));
+      controls.target.add(vLook);
+      camera.position.add(vLook);
+    }
+  } else if (camMode === "overview" && cam.k < 1 && cam.home) {
+    camera.position.lerpVectors(cam.from.pos, cam.home.pos, k);
+    controls.target.lerpVectors(cam.from.target, cam.home.target, k);
+    if (cam.k >= 1) controls.enabled = true;
+    camera.lookAt(controls.target);
+    return;
+  }
+  controls.enabled = camMode !== "fpv";
+  controls.update();
+}
+
+// the followed fly has died: say how, and go back to the overview
+function followedFlyDied(id) {
+  const c = sim.corpses.findLast((c) => c.id === id);
+  const how = c ? CAUSE_TEXT[c.cause] || "died" : "died";
+  const lived = c ? ` at ${Math.round(c.lived)} s old` : "";
+  toast(`Fly #${id} ${how}${lived}${camMode !== "overview" ? " — back to the overview" : ""}.`);
+  selId = -1;
+  selected = -1;
+  trailPts.length = 0;
+  setCamMode("overview");
+  panels.selectFly(-1);
+}
+
+let toastTimer = 0;
+function toast(msg) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.classList.add("on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("on"), 4000);
 }
 
 // ------------------------------------------------------------------ panels, brain, ideas
@@ -720,11 +926,14 @@ async function buildBrain() {
   panels.brain = real;
   real.resize();
 }
-const panels = new Panels({ sim: () => sim, cx, analysis, refs, brain, onFollow: (v) => (follow = v), onDeselect: () => select(-1) });
+const panels = new Panels({ sim: () => sim, cx, analysis, refs, brain, onCamMode: (m) => setCamMode(m), onDeselect: () => select(-1) });
 const ideas = new IdeasMap($("#ideas-svg"), $("#ideas-detail"), { sim: () => sim, cx, analysis, refs });
 
 // ------------------------------------------------------------------ shareable state (?V=2&C=5&game=pd…)
-const SLIDERS = { V: "#r-V", C: "#r-C", mut: "#r-mut", n: "#r-n", gain: "#r-gain", eps: "#r-eps", min: "#r-min", drag: "#r-drag" };
+const SLIDERS = {
+  V: "#r-V", C: "#r-C", mut: "#r-mut", n: "#r-n", gain: "#r-gain", eps: "#r-eps", min: "#r-min", drag: "#r-drag",
+  life: "#r-life", clutch: "#r-clutch", dev: "#r-dev", met: "#r-met", food: "#r-food", bird: "#r-bird", larv: "#r-larv",
+};
 const ROBOT_BOXES = { picker: "#c-picker", net: "#c-net", shooter: "#c-shooter", stacker: "#c-stacker" };
 const query = new URLSearchParams(location.search);
 for (const [k, id] of Object.entries(SLIDERS)) if (query.has(k)) $(id).value = query.get(k);
@@ -732,40 +941,68 @@ if (query.has("pred")) $("#c-pred").checked = query.get("pred") !== "0";
 if (query.has("bots")) for (const [k, id] of Object.entries(ROBOT_BOXES)) $(id).checked = query.get("bots").split(",").includes(k);
 
 // ------------------------------------------------------------------ controls wiring
-function bindRange(id, out, fmt, apply) {
+// `mark` labels a user's change on the population chart (not the initial sync)
+function bindRange(id, out, fmt, apply, mark = null) {
   const el = $(id), o = $(out);
-  const f = () => {
+  const f = (e) => {
     o.textContent = fmt(+el.value);
     apply(+el.value);
+    if (e && mark && !syncing) sim.mark(mark(fmt(+el.value)));
   };
   el.addEventListener("input", f);
   f();
 }
+let syncing = false; // true while controls are being set from a loaded model
+const pct = (v) => `${v.toFixed(0)} %`, secs = (v) => `${v.toFixed(0)} s`, times = (v) => `×${v.toFixed(2)}`;
+bindRange("#r-life", "#o-life", secs, (v) => (sim.params.lifespan = v), (t) => `lifespan ${t}`);
+bindRange("#r-clutch", "#o-clutch", (v) => v.toFixed(0), (v) => (sim.params.clutch = v), (t) => `clutch ${t}`);
+bindRange("#r-dev", "#o-dev", secs, (v) => (sim.params.develop = v), (t) => `development ${t}`);
+bindRange("#r-met", "#o-met", times, (v) => (sim.params.metabolism = v), (t) => `metabolism ${t}`);
+bindRange("#r-food", "#o-food", times, (v) => (sim.params.food = v), (t) => `food ${t}`);
+bindRange("#r-n", "#o-n", (v) => v.toFixed(0), () => {}); // used by Restart
+bindRange("#r-bird", "#o-bird", secs, (v) => (sim.params.birdEvery = v), (t) => `bird every ${t}`);
+bindRange("#r-drag", "#o-drag", (v) => v.toFixed(0), (v) => (sim.params.chasers = v), (t) => `dragonflies ${t}`);
+bindRange("#r-larv", "#o-larv", pct, (v) => (sim.params.larvicide = v / 100), (t) => `larvicide ${t}`);
 bindRange("#r-V", "#o-V", (v) => v.toFixed(1), (v) => (sim.params.V = v));
 bindRange("#r-C", "#o-C", (v) => v.toFixed(1), (v) => (sim.params.C = v));
 bindRange("#r-mut", "#o-mut", (v) => v.toFixed(2), (v) => (sim.params.mutation = v));
-bindRange("#r-n", "#o-n", (v) => v.toFixed(0), (v) => sim.setFlyCount(v));
-bindRange("#r-gain", "#o-gain", (v) => v.toFixed(1), (v) => (sim.params.gain = v));
+bindRange("#r-gain", "#o-gain", (v) => v.toFixed(1), (v) => (sim.params.gain = v), (t) => `gain ${t}`);
 bindRange("#r-eps", "#o-eps", (v) => v.toFixed(1), (v) => (sim.params.dbEps = v));
 bindRange("#r-min", "#o-min", (v) => v.toFixed(0), (v) => (sim.params.dbMin = v));
-$("#c-pred").addEventListener("change", (e) => (sim.params.predator = e.target.checked));
+$("#c-pred").addEventListener("change", (e) => {
+  sim.params.predator = e.target.checked;
+  sim.mark(`bird ${e.target.checked ? "on" : "off"}`);
+});
 sim.params.predator = $("#c-pred").checked;
-bindRange("#r-drag", "#o-drag", (v) => v.toFixed(0), (v) => (sim.params.chasers = v));
-function applyRobots() {
+function applyRobots(e) {
   sim.params.robots = Object.fromEntries(Object.entries(ROBOT_BOXES).map(([k, id]) => [k, $(id).checked]));
+  if (e?.target) sim.mark(`${Object.keys(ROBOT_BOXES).find((k) => ROBOT_BOXES[k] === "#" + e.target.id)} ${e.target.checked ? "on" : "off"}`);
 }
 for (const id of Object.values(ROBOT_BOXES)) $(id).addEventListener("change", applyRobots);
 applyRobots();
+$("#btn-release").addEventListener("click", () => {
+  const k = sim.release(20);
+  if (k) sim.mark(`released ${k}`);
+  toast(k ? `Released ${k} wild flies.` : `The arena is full (${sim.cap} flies).`);
+});
 $("#c-social").addEventListener("change", (e) => (settings.social = e.target.checked));
 $("#c-path").addEventListener("change", (e) => (settings.path = e.target.checked));
 $("#c-paths-all").addEventListener("change", (e) => (settings.pathsAll = e.target.checked));
 $("#sel-speed").addEventListener("change", (e) => (settings.speed = +e.target.value));
 $("#btn-pause").addEventListener("click", togglePause);
 addEventListener("keydown", (e) => {
-  if (e.code === "Space" && e.target === document.body) {
+  if (e.code === "Escape") {
+    // first leave the follow camera, then let go of the fly
+    if (camMode !== "overview") setCamMode("overview");
+    else if (selId >= 0) select(-1);
+    return;
+  }
+  if (e.target !== document.body || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === "Space") {
     e.preventDefault();
     togglePause();
-  }
+  } else if (e.code === "KeyF" && selected >= 0) setCamMode(camMode === "chase" ? "overview" : "chase");
+  else if (e.code === "KeyV" && selected >= 0) setCamMode(camMode === "fpv" ? "overview" : "fpv");
 });
 function togglePause() {
   settings.paused = !settings.paused;
@@ -815,7 +1052,7 @@ if (GAMES[query.get("game")]) {
   setGame(query.get("game"), true);
 }
 if (query.get("learn") === "anyone") pickLearn("anyone");
-if (["strategy", "health", "swarm", "mode", "energy"].includes(query.get("color"))) pickColor(query.get("color"));
+if (["strategy", "health", "swarm", "mode", "energy", "age"].includes(query.get("color"))) pickColor(query.get("color"));
 panels.legend(settings.color);
 
 // silencing experiments
@@ -834,7 +1071,10 @@ for (const s of SILENCE) {
   const lab = document.createElement("label");
   lab.className = "check";
   lab.innerHTML = `<input type="checkbox" /> <span>${s.label}<small>${s.hint}</small></span>`;
-  lab.querySelector("input").addEventListener("change", applySilence);
+  lab.querySelector("input").addEventListener("change", (e) => {
+    applySilence();
+    sim.mark(`${s.label.split(" (")[0]} ${e.target.checked ? "silenced" : "restored"}`);
+  });
   s.input = lab.querySelector("input");
   silenceBox.appendChild(lab);
 }
@@ -883,16 +1123,22 @@ function swapSim(next) {
   sim = next;
   sim.brains.enableWorker(WORKER_URL);
   buildWorld();
+  selId = -1;
   select(-1);
 }
 // put every control back in step with a restored model
 function syncControls(ui) {
   const P = sim.params;
-  const vals = { V: P.V, C: P.C, mut: P.mutation, n: sim.n, gain: P.gain, eps: P.dbEps, min: P.dbMin, drag: P.chasers };
+  const vals = {
+    V: P.V, C: P.C, mut: P.mutation, n: sim.n, gain: P.gain, eps: P.dbEps, min: P.dbMin, drag: P.chasers,
+    life: P.lifespan, clutch: P.clutch, dev: P.develop, met: P.metabolism, food: P.food, bird: P.birdEvery, larv: P.larvicide * 100,
+  };
+  syncing = true;
   for (const [k, id] of Object.entries(SLIDERS)) {
     $(id).value = vals[k];
     $(id).dispatchEvent(new Event("input"));
   }
+  syncing = false;
   $("#c-pred").checked = P.predator;
   for (const [k, id] of Object.entries(ROBOT_BOXES)) $(id).checked = !!P.robots?.[k];
   applyRobots();
@@ -925,7 +1171,8 @@ function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
   renderer.setSize(w, h);
   camera.aspect = w / h;
-  camera.fov = w < h ? 62 : 45; // portrait screens need a wider view to fit the arena
+  baseFov = w < h ? 62 : 45; // portrait screens need a wider view to fit the arena
+  if (camMode !== "fpv") camera.fov = baseFov;
   camera.updateProjectionMatrix();
   brain.resize();
 }
@@ -960,9 +1207,12 @@ function frame(now) {
     }
     if (steps === 6) acc = 0; // fall behind gracefully on slow machines
   }
-  if (selected >= sim.n) select(-1);
+  if (selId >= 0) {
+    selected = sim.slotOf(selId, selected);
+    if (selected < 0) followedFlyDied(selId);
+  }
   updateScene();
-  controls.update();
+  updateCamera(dt);
   renderer.render(scene, camera);
   brain.render(sim, selected);
   if (!started) {
@@ -975,6 +1225,8 @@ function frame(now) {
   if (uiTimer > 0.25) {
     uiTimer = 0;
     panels.update(selected);
+    panels.hud();
+    if (camMode === "fpv") panels.fpvLabel(selected);
     ideas.update();
     syncUrl();
   }
